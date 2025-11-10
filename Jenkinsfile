@@ -23,10 +23,15 @@ pipeline {
                 sh 'mvn test' 
             }
         }
-        stage('SCA - Dependency Check') {
+       stage('SCA - Dependency Check') {
             steps {
-                sh 'mvn org.owasp:dependency-check-maven:check -DfailBuildOnCVSS=7'
-                // -DfailBuildOnCVSS=7 échoue pour vulnérabilités critiques/hautes
+                sh '''
+                    mvn org.owasp:dependency-check-maven:check \
+                    -DfailBuildOnCVSS=7 \
+                    -Dodc.data.directory=./dependency-check-data \
+                    -Dnvd.api.key="" \
+                    -Dnvd.api.delay=2000
+                '''
             }
         }
         // Etape 3 : compilation du code source  
