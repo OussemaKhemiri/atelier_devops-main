@@ -107,15 +107,14 @@ pipeline {
                 }
             }
         }
-        stage('DAST - Security Scan') {
+         stage('DAST - Security Scan') {
             steps {
                 sh '''
+                    mkdir -p zap-report
                     docker run -t --rm \\
-                    -v $(pwd)/zap-report:/zap/reports:rw \\
-                    owasp/zap2docker-stable zap-baseline.py \\
-                    -t http://172.20.10.2:8089/kaddem \\
-                    -r zap-report.html \\
-                    -w zap-report.md
+                    -v $(pwd)/zap-report:/zap/wrk:rw \\
+                    owasp/zap2docker-stable:latest \\
+                    zap-baseline.py -t http://172.20.10.2:8089/kaddem
                 '''
             }
         }
