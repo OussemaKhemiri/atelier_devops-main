@@ -2,8 +2,8 @@ version: '3.8'
 
 services:
   app:
-    image: oussemakhemiri2/oussemakhemiri-4twin1-kaddem:latest
-    container_name: oussemakhemiri-4twin1-kaddem
+    image: cirin/kaddem:latest
+    container_name: kaddem
     build:
       context: .
       dockerfile: Dockerfile
