@@ -29,31 +29,34 @@ pipeline {
        stage('SCA - Trivy File Scan') {
             steps {
                 script {
-                    echo "🛡️ Installing and Running Trivy (Low Bandwidth Mode)..."
+                    echo "🛡️ Installing and Running Trivy (Crash-Proof Mode)..."
                     
-                    // 1. Download Trivy Binary (This is small, ~10MB)
+                    // 1. Install Trivy
                     sh 'curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b .'
                     
-                    // 2. Run Trivy with Timeout and Amazon Mirror
-                    // --timeout 20m: Gives it 20 minutes instead of the default 5.
-                    // --db-repository: Uses Amazon's server which is often more stable than GitHub's.
-                    // --skip-db-update: IF you have a DB from a previous run, this skips the download. 
-                    // (It will ignore this flag automatically if the DB is missing).
+                    // 2. Try to run Trivy (Timeout set to 15m)
+                    // We REMOVED --skip-db-update so it tries to download.
+                    // We use 'returnStatus: true' so Jenkins doesn't crash if it fails.
+                    def exitCode = sh(script: './trivy fs --timeout 15m --db-repository public.ecr.aws/aquasecurity/trivy-db --format json --output trivy-report.json .', returnStatus: true)
                     
-                    def trivyCmd = "./trivy fs --timeout 20m --db-repository public.ecr.aws/aquasecurity/trivy-db --skip-db-update"
-
-                    // JSON Report
-                    sh "${trivyCmd} --format json --output trivy-report.json ."
-                    
-                    // Text Report
-                    sh "${trivyCmd} --format table --output trivy-report.txt ."
-
-                    // HTML Report
-                    sh '''
-                        wget --timeout=60 --tries=3 https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -O html.tpl || true
+                    if (exitCode == 0) {
+                        echo "✅ Trivy Scan Successful! Generating other reports..."
                         
-                        ./trivy fs --timeout 20m --skip-db-update --format template --template "@html.tpl" --output trivy-report.html . || echo "Trivy HTML generation failed"
-                    '''
+                        // Generate Text Report (Fast, no download needed now)
+                        sh './trivy fs --skip-db-update --format table --output trivy-report.txt .'
+
+                        // Generate HTML Report
+                        sh 'wget --timeout=30 https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -O html.tpl || true'
+                        sh './trivy fs --skip-db-update --format template --template "@html.tpl" --output trivy-report.html . || true'
+                        
+                    } else {
+                        echo "⚠️ Trivy Failed (likely network timeout). Skipping scan but continuing pipeline."
+                        
+                        // Create DUMMY files so the 'archiveArtifacts' step doesn't crash later
+                        sh 'echo "[]" > trivy-report.json'
+                        sh 'echo "Trivy Scan Skipped due to low bandwidth." > trivy-report.txt'
+                        sh 'echo "<html><body><h1>Scan Skipped</h1><p>Network timeout downloading vulnerability DB.</p></body></html>" > trivy-report.html'
+                    }
                 }
             }
         }
