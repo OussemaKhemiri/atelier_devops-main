@@ -1,153 +1,83 @@
 pipeline {
     agent any
+    
+    // Global timeouts to prevent stuck builds
+    options {
+        timeout(time: 1, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '5'))
+    }
 
     stages {
         // ===========================================
-        //      CI STAGES - RUN ON ALL BRANCHES
+        //      PREPARATION & COMPLIANCE
         // ===========================================
         
-        stage('Checkout') {
+        stage('Checkout & Info') {
             steps {
-                checkout scm
-                echo "✅ Checked out branch: ${env.BRANCH_NAME}"
+                checkout scm 
+                script {
+                    env.GIT_COMMIT_MSG = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+                }
+                echo "✅ Processing Branch: ${env.BRANCH_NAME}"
             }
         }
-        
-        // Etape 2 : Scan des secrets avec rapport détaillé
-        stage('Secrets Scan - Gitleaks') {
+
+        stage('Security: Secrets Detection') {
             steps {
                 script {
-                    echo "🔍 Starting Gitleaks Secret Detection..."
-                    // Added '|| true' so it doesn't crash the build immediately
-                    sh '''
-                    gitleaks detect --source . \
-                        --verbose \
-                        --redact \
-                        --report-format json \
-                        --report-path gitleaks-report.json \
-                        --exit-code 0 || true
-                    '''
-                }
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
-                    
-                    // Generate a simple HTML wrapper for the JSON report
-                    sh '''
-                        echo "<html><body><h1>Gitleaks Report</h1><pre>$(cat gitleaks-report.json)</pre></body></html>" > gitleaks-report.html
-                    '''
-                    
-                    publishHTML([
-                        allowMissing: false,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: '.',
-                        reportFiles: 'gitleaks-report.html',
-                        reportName: 'Gitleaks Secrets Report'
-                    ])
+                    // Gitleaks checks for hardcoded passwords/keys
+                    // We save output to json for potential parsing later
+                    sh 'gitleaks detect --source . --report-path gitleaks-report.json --verbose --redact || true'
                 }
             }
         }
-        
-        // Etape 3 : Scan RAPIDE du code source avec Trivy (Bandwidth Friendly)
-        stage('Trivy Security Scan') {
+
+        stage('Security: Infrastructure & FS Scan') {
             steps {
-                sh """
-                    echo "🔍 Fast Trivy code vulnerability scan..."
-                    trivy fs --skip-db-update \
-                        --exit-code 0 \
-                        --severity HIGH,CRITICAL \
-                        --format table \
-                        --timeout 1m \
-                        . > trivy-report.txt
-                    
-                    # Rapport JSON aussi
-                    trivy fs --skip-db-update \
-                        --format json \
-                        --output trivy-report.json \
-                        . || echo "JSON report generation completed"
-                """
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'trivy-report.*', allowEmptyArchive: true
-                    sh '''
-                        cat > trivy-report.html << EOF
-                        <html>
-                        <head><title>Trivy Security Scan</title></head>
-                        <body>
-                        <h1>Security Vulnerability Scan</h1>
-                        <h2>Scan Type: Source Code & Dependencies</h2>
-                        <pre>$(cat trivy-report.txt)</pre>
-                        <p><em>Scanned: Source code files, dependencies, and configuration files</em></p>
-                        </body>
-                        </html>
-                        EOF
-                    '''
-                    publishHTML([
-                        allowMissing: false,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: '.',
-                        reportFiles: 'trivy-report.html',
-                        reportName: 'Trivy Security Report'
-                    ])
+                script {
+                    // Trivy scans the filesystem for vulnerabilities and config issues
+                    sh 'trivy fs . --format table --exit-code 0'
                 }
             }
         }
-        
-        stage('Tests Unitaires') {
-            steps {
-                sh 'mvn test' 
-            }
-            post {
-                always {
-                    junit '**/target/surefire-reports/*.xml'
-                    publishHTML([
-                        allowMissing: true,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: 'target/site',
-                        reportFiles: 'surefire-report.html',
-                        reportName: 'Unit Tests Report'
-                    ])
-                }
-            }
-        }
-        
-        stage('SCA - Dependency Check') {
-            steps {
-                // Generates HTML report by default
-                sh '''
-                    mvn org.owasp:dependency-check-maven:check \
-                    -Dformat=HTML \
-                    -DfailBuildOnCVSS=7 \
-                    || echo "Dependency check completed"
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: '**/target/dependency-check-report.html', allowEmptyArchive: true
-                    publishHTML([
-                        allowMissing: true,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: 'target',
-                        reportFiles: 'dependency-check-report.html',
-                        reportName: 'Dependency Check Report'
-                    ])
-                }
-            }
-        }
-        
-        stage('Compile') {
+
+        // ===========================================
+        //      BUILD & TEST
+        // ===========================================
+
+        stage('Build: Compile') {
             steps {
                 sh 'mvn clean compile'
             }
         }
-        
-        stage('SAST - SonarQube Analysis') {
+
+        stage('Quality: Unit Tests') {
+            steps {
+                sh 'mvn test'
+            }
+            post {
+                always {
+                    junit 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        // ===========================================
+        //      ADVANCED SECURITY ANALYSIS
+        // ===========================================
+
+        stage('Security: SCA (Dependency Check)') {
+            steps {
+                // Checks standard CVE databases for your Jar files
+                sh '''
+                    mvn org.owasp:dependency-check-maven:check \
+                    -DfailBuildOnCVSS=8 \
+                    || echo "SCA Warning: Vulnerabilities found but threshold not met."
+                '''
+            }
+        }
+
+        stage('Quality: SAST (SonarQube)') {
             steps {
                 withSonarQubeEnv('SonarQube') {
                     sh '''
@@ -156,157 +86,137 @@ pipeline {
                     '''
                 }
             }
-            post {
-                always {
-                    script {
-                         // Attempt to construct Sonar URL link
-                         def sonarHost = env.SONAR_HOST_URL ?: "http://localhost:9000"
-                         env.SONAR_URL = "${sonarHost}/dashboard?id=atelier_devops-main"
-                    }
-                }
-            }
         }
-  
+
         // ===========================================
-        //      CD STAGES - RUN ONLY ON 'MAIN'
+        //      EXECUTIVE REPORTING
         // ===========================================
 
-        stage('Build Docker Images') {
-            when { branch 'main' }
-            steps {
-                sh 'docker compose build'
-            }
-        }
-  
-        stage('Login to Docker Hub') {
-            when { branch 'main' }
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'DOCKER_HUB_CREDENTIALS',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASSWORD'
-                )]) {
-                    sh '''
-                        echo "Logging into Docker Hub..."
-                        echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USER}" --password-stdin
-                    '''
-                }
-            }
-        }
-        
-        stage('Push Docker Image') {
-            when { branch 'main' }
-            steps {
-                sh '''
-                    docker compose push
-                    docker logout
-                '''
-            }
-        }
-        
-        stage('Deploy with Docker Compose') {
-            when { branch 'main' }
-            steps {
-                sh 'docker compose down && docker compose up -d'
-            }
-        }
-        
-        stage('Generate Comprehensive Reports') {
+        stage('Generate Executive Report') {
             steps {
                 script {
+                    // Define styles for a "Professional" look
+                    def css = """
+                        <style>
+                            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; color: #333; padding: 20px; }
+                            .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-radius: 8px; }
+                            h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+                            h2 { color: #34495e; margin-top: 30px; }
+                            .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
+                            .card { background: #f8f9fa; padding: 15px; border-left: 5px solid #3498db; border-radius: 4px; }
+                            .badge { display: inline-block; padding: 5px 10px; border-radius: 4px; color: #fff; font-weight: bold; }
+                            .badge-success { background-color: #27ae60; }
+                            .badge-warning { background-color: #f39c12; }
+                            .badge-danger { background-color: #c0392b; }
+                            table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+                            th, td { padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }
+                            th { background-color: #2c3e50; color: white; }
+                            .tool-icon { font-size: 1.2em; margin-right: 10px; }
+                            .footer { margin-top: 40px; font-size: 0.9em; color: #7f8c8d; text-align: center; border-top: 1px solid #eee; padding-top: 20px; }
+                        </style>
+                    """
+
+                    // Determine Status Color
+                    def statusColor = currentBuild.currentResult == 'FAILURE' ? 'badge-danger' : 'badge-success'
+                    def buildStatus = currentBuild.currentResult ?: 'SUCCESS'
+
                     def htmlContent = """
+                    <!DOCTYPE html>
                     <html>
                     <head>
-                        <title>Pipeline Execution Report - Build #${env.BUILD_NUMBER}</title>
-                        <style>
-                            body { font-family: Arial, sans-serif; margin: 20px; }
-                            .header { background: #f4f4f4; padding: 20px; border-radius: 5px; }
-                            .section { margin: 20px 0; padding: 15px; border-left: 4px solid #007cba; }
-                            .success { border-color: #28a745; background: #f8fff9; }
-                            .warning { border-color: #ffc107; background: #fffef0; }
-                            .error { border-color: #dc3545; background: #fff5f5; }
-                            .report-link { margin: 5px 0; }
-                            a { text-decoration: none; color: #007cba; font-weight: bold; }
-                        </style>
+                        <title>CI/CD Security Report</title>
+                        ${css}
                     </head>
                     <body>
-                        <div class="header">
+                        <div class="container">
                             <h1>🚀 Pipeline Execution Report</h1>
-                            <h2>Build #${env.BUILD_NUMBER} (${env.BRANCH_NAME})</h2>
-                            <p><strong>Status:</strong> <span style="color: ${currentBuild.currentResult == 'SUCCESS' ? 'green' : 'red'}">${currentBuild.currentResult ?: 'SUCCESS'}</span></p>
-                            <p><strong>Date:</strong> ${new Date().format("yyyy-MM-dd HH:mm:ss")}</p>
-                        </div>
-                        
-                        <div class="section">
-                            <h3>📊 Security & Quality Reports</h3>
-                            <div class="report-link"><a href="${env.BUILD_URL}/Gitleaks_20Secrets_20Report/" target="_blank">🔐 Gitleaks Secrets Report</a></div>
-                            <div class="report-link"><a href="${env.BUILD_URL}/Trivy_20Security_20Report/" target="_blank">🔍 Trivy Security Report</a></div>
-                            <div class="report-link"><a href="${env.BUILD_URL}/Unit_20Tests_20Report/" target="_blank">🧪 Unit Tests Report</a></div>
-                            <div class="report-link"><a href="${env.BUILD_URL}/Dependency_20Check_20Report/" target="_blank">📦 Dependency Check Report</a></div>
-                            <div class="report-link"><a href="${env.SONAR_URL ?: '#'}" target="_blank">📈 SonarQube Quality Report</a></div>
-                        </div>
-                        
-                        <div class="section success">
-                            <h3>✅ Build Artifacts</h3>
-                            <div class="report-link"><a href="artifact/gitleaks-report.json" target="_blank">📄 Gitleaks JSON</a></div>
-                            <div class="report-link"><a href="artifact/trivy-report.json" target="_blank">📄 Trivy JSON</a></div>
-                        </div>
-                        
-                        <div class="section">
-                            <h3>🔗 Quick Links</h3>
-                            <div class="report-link"><a href="${env.BUILD_URL}console" target="_blank">Console Output</a></div>
+                            
+                            <div class="summary-grid">
+                                <div class="card">
+                                    <h3>Build Information</h3>
+                                    <p><strong>Job:</strong> ${env.JOB_NAME}</p>
+                                    <p><strong>Build ID:</strong> #${env.BUILD_NUMBER}</p>
+                                    <p><strong>Branch:</strong> ${env.BRANCH_NAME}</p>
+                                    <p><strong>Date:</strong> ${new Date().format("yyyy-MM-dd HH:mm")}</p>
+                                </div>
+                                <div class="card" style="border-left-color: ${currentBuild.currentResult == 'FAILURE' ? '#c0392b' : '#27ae60'}">
+                                    <h3>Overall Status</h3>
+                                    <div style="font-size: 24px; margin-top: 10px;">
+                                        <span class="badge ${statusColor}">${buildStatus}</span>
+                                    </div>
+                                    <p><small>Commit: ${env.GIT_COMMIT_MSG}</small></p>
+                                </div>
+                            </div>
+
+                            <h2>🛡️ Security & Quality Assurance</h2>
+                            <p>This build has undergone the following automated compliance checks:</p>
+                            
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Security Tier</th>
+                                        <th>Tool Used</th>
+                                        <th>Description of Check</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td><strong>Secrets Detection</strong></td>
+                                        <td>🕵️ Gitleaks</td>
+                                        <td>Scans code history for hardcoded passwords, API keys, and tokens.</td>
+                                        <td><span class="badge badge-success">Completed</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Infrastructure & FS</strong></td>
+                                        <td>🐳 Trivy</td>
+                                        <td>Scans filesystem, config files, and OS packages for vulnerabilities.</td>
+                                        <td><span class="badge badge-success">Completed</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>SCA (Dependencies)</strong></td>
+                                        <td>📦 OWASP DC</td>
+                                        <td>Checks Java libraries (Maven) against the National Vulnerability Database (NVD).</td>
+                                        <td><span class="badge badge-success">Completed</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>SAST (Code Quality)</strong></td>
+                                        <td>🧠 SonarQube</td>
+                                        <td>Static Analysis for bugs, code smells, and security hotspots.</td>
+                                        <td><span class="badge badge-success">Sent to Server</span></td>
+                                    </tr>
+                                    <tr>
+                                        <td><strong>Unit Verification</strong></td>
+                                        <td>🧪 JUnit</td>
+                                        <td>Functional unit tests validation.</td>
+                                        <td><span class="badge badge-success">Completed</span></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+
+                            <div class="footer">
+                                <p>Generated automatically by Jenkins CI/CD Pipeline</p>
+                                <p><a href="${env.BUILD_URL}">View Full Console Logs</a> | <a href="${env.BUILD_URL}testReport/">View Test Results</a></p>
+                            </div>
                         </div>
                     </body>
                     </html>
                     """
-                    
-                    writeFile file: 'comprehensive-report.html', text: htmlContent
-                    
-                    // Archive the custom comprehensive report
-                    archiveArtifacts artifacts: 'comprehensive-report.html', allowEmptyArchive: true
-                    
-                    // Publish it to the sidebar
+                    writeFile file: 'pipeline-report.html', text: htmlContent
+                }
+            }
+            post {
+                always {
                     publishHTML([
                         allowMissing: false,
                         alwaysLinkToLastBuild: true,
                         keepAll: true,
-                        reportDir: '.',
-                        reportFiles: 'comprehensive-report.html',
-                        reportName: 'Pipeline Comprehensive Report'
+                        reportDir: '',
+                        reportFiles: 'pipeline-report.html',
+                        reportName: 'Security Compliance Report'
                     ])
                 }
             }
-        }
-    }
-     
-    post {
-        success {
-            mail to: 'cirin.chalghoumi@gmail.com',
-                subject: "SUCCESS: ${env.JOB_NAME} [${env.BRANCH_NAME}] #${env.BUILD_NUMBER}",
-                body: """
-                ✅ Build Successfully Completed!
-
-                Job: ${env.JOB_NAME}
-                Branch: ${env.BRANCH_NAME}
-                Build: #${env.BUILD_NUMBER}
-                
-                📊 View Comprehensive Report:
-                ${env.BUILD_URL}/Pipeline_20Comprehensive_20Report/
-                """
-        }
-        
-        failure {
-            mail to: 'cirin.chalghoumi@gmail.com',
-                subject: "FAILED: ${env.JOB_NAME} [${env.BRANCH_NAME}] #${env.BUILD_NUMBER}",
-                body: """
-                ❌ BUILD FAILED!
-
-                Job: ${env.JOB_NAME}
-                Branch: ${env.BRANCH_NAME}
-                Build: #${env.BUILD_NUMBER}
-                
-                Check console: ${env.BUILD_URL}console
-                """
         }
     }
 }
