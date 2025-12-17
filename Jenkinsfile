@@ -15,7 +15,8 @@ pipeline {
             steps {
                 checkout scm 
                 script {
-                    // Capture commit message safely
+                    // We fetch the commit message here.
+                    // We will sanitize it later in the report stage.
                     env.GIT_COMMIT_MSG = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
                 }
                 echo "✅ Processing Branch: ${env.BRANCH_NAME}"
@@ -30,7 +31,6 @@ pipeline {
 
         stage('Security: Infrastructure & FS Scan') {
             steps {
-                // Ensure trivy is installed (see linux commands below if this fails)
                 sh 'trivy fs . --format table --exit-code 0'
             }
         }
@@ -82,7 +82,7 @@ pipeline {
         }
 
         // ===========================================
-        //      EXECUTIVE REPORTING (The Fix)
+        //      EXECUTIVE REPORTING (FIXED)
         // ===========================================
 
         stage('Generate Executive Report') {
@@ -92,7 +92,6 @@ pipeline {
                     env.REP_DATE = sh(returnStdout: true, script: 'date "+%Y-%m-%d %H:%M"').trim()
                     env.REP_STATUS = currentBuild.currentResult ?: 'SUCCESS'
                     
-                    // Logic for colors
                     if (env.REP_STATUS == 'FAILURE') {
                         env.REP_COLOR = '#c0392b' // Red
                         env.REP_BADGE = 'badge-danger'
@@ -102,7 +101,7 @@ pipeline {
                     }
                 }
 
-                // 2. Create CSS File (Part 1)
+                // 2. Create CSS File
                 writeFile file: 'report_style.css', text: '''
                     <style>
                         body { font-family: 'Segoe UI', sans-serif; background-color: #f4f7f6; color: #333; padding: 20px; }
@@ -121,7 +120,7 @@ pipeline {
                     </style>
                 '''
 
-                // 3. Create HTML Template (Part 2) - Using PLACEHOLDERS instead of variables
+                // 3. Create HTML Template
                 writeFile file: 'report_template.html', text: '''
                     <!DOCTYPE html>
                     <html>
@@ -174,14 +173,15 @@ pipeline {
                     </html>
                 '''
 
-                // 4. Inject Data using Shell (SED) - Bypasses Jenkins memory issues
+                // 4. Inject Data (With Sanitization Fix)
                 sh '''
-                    # Combine CSS into the HTML
-                    CSS_CONTENT=$(cat report_style.css)
-                    # Use awk/sed to escape newlines if needed, but for simple substitution:
+                    # Sanitize Commit Message: Remove Newlines and Pipes to prevent SED crash
+                    SAFE_COMMIT=$(echo "${GIT_COMMIT_MSG}" | tr '\\n' ' ' | tr '|' '/')
+
+                    # Inject CSS (Remove newlines from CSS to make it one block)
                     sed -e "s|__CSS_PLACEHOLDER__|$(cat report_style.css | tr -d '\\n')|g" report_template.html > temp_report.html
 
-                    # Replace variables (Use | as delimiter to avoid issues with / in URLs)
+                    # Inject Variables using SAFE_COMMIT
                     sed -i "s|__JOB_NAME__|${JOB_NAME}|g" temp_report.html
                     sed -i "s|__BUILD_NUMBER__|${BUILD_NUMBER}|g" temp_report.html
                     sed -i "s|__BRANCH_NAME__|${BRANCH_NAME}|g" temp_report.html
@@ -189,7 +189,7 @@ pipeline {
                     sed -i "s|__COLOR__|${REP_COLOR}|g" temp_report.html
                     sed -i "s|__BADGE_CLASS__|${REP_BADGE}|g" temp_report.html
                     sed -i "s|__STATUS__|${REP_STATUS}|g" temp_report.html
-                    sed -i "s|__COMMIT__|${GIT_COMMIT_MSG}|g" temp_report.html
+                    sed -i "s|__COMMIT__|${SAFE_COMMIT}|g" temp_report.html
                     sed -i "s|__BUILD_URL__|${BUILD_URL}|g" temp_report.html
 
                     # Finalize
