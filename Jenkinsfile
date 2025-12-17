@@ -15,7 +15,7 @@ pipeline {
             steps {
                 checkout scm 
                 script {
-                    // Capture commit message into an ENV variable for use in shell later
+                    // Get commit message safely
                     env.GIT_COMMIT_MSG = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
                 }
                 echo "✅ Processing Branch: ${env.BRANCH_NAME}"
@@ -24,6 +24,7 @@ pipeline {
 
         stage('Security: Secrets Detection') {
             steps {
+                // Returns 0 even if leaks found (|| true) so we can report on it later instead of crashing
                 sh 'gitleaks detect --source . --report-path gitleaks-report.json --verbose --redact || true'
             }
         }
@@ -71,6 +72,7 @@ pipeline {
 
         stage('Quality: SAST (SonarQube)') {
             steps {
+                // Ensure your Jenkins System Config has a SonarQube server named 'SonarQube'
                 withSonarQubeEnv('SonarQube') {
                     sh '''
                         mvn clean verify sonar:sonar \
@@ -81,17 +83,15 @@ pipeline {
         }
 
         // ===========================================
-        //      EXECUTIVE REPORTING (SHELL METHOD)
+        //      EXECUTIVE REPORTING (CHUNKED)
         // ===========================================
 
         stage('Generate Executive Report') {
             steps {
                 script {
-                    // Set variables for the shell script
+                    // 1. Prepare Data
                     env.REPORT_DATE = sh(returnStdout: true, script: 'date "+%Y-%m-%d %H:%M"').trim()
                     env.BUILD_STATUS = currentBuild.currentResult ?: 'SUCCESS'
-                    
-                    // Determine colors using shell logic variables
                     if (env.BUILD_STATUS == 'FAILURE') {
                         env.STATUS_COLOR = '#c0392b' // Red
                         env.BADGE_CLASS = 'badge-danger'
@@ -101,7 +101,7 @@ pipeline {
                     }
                 }
 
-                // Generate HTML using Linux 'cat' (Bypasses Groovy CPS issues)
+                // 2. Write HEADER (Part 1/3) - Creates the file
                 sh '''
 cat <<EOF > pipeline-report.html
 <!DOCTYPE html>
@@ -128,7 +128,11 @@ cat <<EOF > pipeline-report.html
 <body>
     <div class="container">
         <h1>🚀 Pipeline Execution Report</h1>
-        
+EOF
+'''
+                // 3. Write SUMMARY & TABLE (Part 2/3) - Appends (>>) to file
+                sh '''
+cat <<EOF >> pipeline-report.html
         <div class="summary-grid">
             <div class="card">
                 <h3>Build Information</h3>
@@ -189,7 +193,11 @@ cat <<EOF > pipeline-report.html
                 </tr>
             </tbody>
         </table>
-
+EOF
+'''
+                // 4. Write FOOTER (Part 3/3) - Appends (>>) to file
+                sh '''
+cat <<EOF >> pipeline-report.html
         <div class="footer">
             <p>Generated automatically by Jenkins CI/CD Pipeline</p>
             <p><a href="${BUILD_URL}">View Full Console Logs</a> | <a href="${BUILD_URL}testReport/">View Test Results</a></p>
@@ -198,7 +206,7 @@ cat <<EOF > pipeline-report.html
 </body>
 </html>
 EOF
-                '''
+'''
             }
             post {
                 always {
