@@ -95,8 +95,30 @@ pipeline {
         stage('Generate Executive Report') {
             steps {
                 script {
-                    // Define styles for a "Professional" look
-                    def css = """
+                    // ===============================================
+                    // 1. PRE-CALCULATE VARIABLES (Fixes the Crash)
+                    // ===============================================
+                    // We convert everything to simple Strings first.
+                    // This prevents Jenkins from crashing during String interpolation.
+                    
+                    String dateStr      = new Date().format("yyyy-MM-dd HH:mm")
+                    String buildStatus  = currentBuild.currentResult ?: 'SUCCESS'
+                    String statusColor  = (buildStatus == 'FAILURE') ? 'badge-danger' : 'badge-success'
+                    String borderColor  = (buildStatus == 'FAILURE') ? '#c0392b' : '#27ae60'
+                    
+                    // Safely handle potentially null env vars
+                    String jobName      = env.JOB_NAME ?: 'Unknown Job'
+                    String buildNum     = env.BUILD_NUMBER ?: '0'
+                    String branchName   = env.BRANCH_NAME ?: 'Unknown Branch'
+                    String buildUrl     = env.BUILD_URL ?: '#'
+                    
+                    // Handle commit message (defaults to placeholder if not set in previous stages)
+                    String commitMsg    = env.GIT_COMMIT_MSG ?: "Commit info not available"
+
+                    // ===============================================
+                    // 2. DEFINE CSS (Separated for cleanliness)
+                    // ===============================================
+                    String css = """
                         <style>
                             body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; color: #333; padding: 20px; }
                             .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-radius: 8px; }
@@ -111,16 +133,15 @@ pipeline {
                             table { width: 100%; border-collapse: collapse; margin-top: 15px; }
                             th, td { padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }
                             th { background-color: #2c3e50; color: white; }
-                            .tool-icon { font-size: 1.2em; margin-right: 10px; }
                             .footer { margin-top: 40px; font-size: 0.9em; color: #7f8c8d; text-align: center; border-top: 1px solid #eee; padding-top: 20px; }
+                            a { color: #3498db; text-decoration: none; }
                         </style>
                     """
 
-                    // Determine Status Color
-                    def statusColor = currentBuild.currentResult == 'FAILURE' ? 'badge-danger' : 'badge-success'
-                    def buildStatus = currentBuild.currentResult ?: 'SUCCESS'
-
-                    def htmlContent = """
+                    // ===============================================
+                    // 3. GENERATE HTML (Now using simple variables)
+                    // ===============================================
+                    String htmlContent = """
                     <!DOCTYPE html>
                     <html>
                     <head>
@@ -134,17 +155,17 @@ pipeline {
                             <div class="summary-grid">
                                 <div class="card">
                                     <h3>Build Information</h3>
-                                    <p><strong>Job:</strong> ${env.JOB_NAME}</p>
-                                    <p><strong>Build ID:</strong> #${env.BUILD_NUMBER}</p>
-                                    <p><strong>Branch:</strong> ${env.BRANCH_NAME}</p>
-                                    <p><strong>Date:</strong> ${new Date().format("yyyy-MM-dd HH:mm")}</p>
+                                    <p><strong>Job:</strong> ${jobName}</p>
+                                    <p><strong>Build ID:</strong> #${buildNum}</p>
+                                    <p><strong>Branch:</strong> ${branchName}</p>
+                                    <p><strong>Date:</strong> ${dateStr}</p>
                                 </div>
-                                <div class="card" style="border-left-color: ${currentBuild.currentResult == 'FAILURE' ? '#c0392b' : '#27ae60'}">
+                                <div class="card" style="border-left-color: ${borderColor}">
                                     <h3>Overall Status</h3>
                                     <div style="font-size: 24px; margin-top: 10px;">
                                         <span class="badge ${statusColor}">${buildStatus}</span>
                                     </div>
-                                    <p><small>Commit: ${env.GIT_COMMIT_MSG}</small></p>
+                                    <p><small>Commit: ${commitMsg}</small></p>
                                 </div>
                             </div>
 
@@ -164,25 +185,25 @@ pipeline {
                                     <tr>
                                         <td><strong>Secrets Detection</strong></td>
                                         <td>🕵️ Gitleaks</td>
-                                        <td>Scans code history for hardcoded passwords, API keys, and tokens.</td>
+                                        <td>Scans code history for hardcoded passwords and keys.</td>
                                         <td><span class="badge badge-success">Completed</span></td>
                                     </tr>
                                     <tr>
-                                        <td><strong>Infrastructure & FS</strong></td>
+                                        <td><strong>Infrastructure</strong></td>
                                         <td>🐳 Trivy</td>
-                                        <td>Scans filesystem, config files, and OS packages for vulnerabilities.</td>
+                                        <td>Scans filesystem and OS packages for vulnerabilities.</td>
                                         <td><span class="badge badge-success">Completed</span></td>
                                     </tr>
                                     <tr>
                                         <td><strong>SCA (Dependencies)</strong></td>
                                         <td>📦 OWASP DC</td>
-                                        <td>Checks Java libraries (Maven) against the National Vulnerability Database (NVD).</td>
+                                        <td>Checks Java libraries against the NVD database.</td>
                                         <td><span class="badge badge-success">Completed</span></td>
                                     </tr>
                                     <tr>
                                         <td><strong>SAST (Code Quality)</strong></td>
                                         <td>🧠 SonarQube</td>
-                                        <td>Static Analysis for bugs, code smells, and security hotspots.</td>
+                                        <td>Static analysis for bugs and security hotspots.</td>
                                         <td><span class="badge badge-success">Sent to Server</span></td>
                                     </tr>
                                     <tr>
@@ -196,12 +217,13 @@ pipeline {
 
                             <div class="footer">
                                 <p>Generated automatically by Jenkins CI/CD Pipeline</p>
-                                <p><a href="${env.BUILD_URL}">View Full Console Logs</a> | <a href="${env.BUILD_URL}testReport/">View Test Results</a></p>
+                                <p><a href="${buildUrl}">View Full Console Logs</a> | <a href="${buildUrl}testReport/">View Test Results</a></p>
                             </div>
                         </div>
                     </body>
                     </html>
                     """
+                    
                     writeFile file: 'pipeline-report.html', text: htmlContent
                 }
             }
