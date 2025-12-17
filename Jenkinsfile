@@ -15,7 +15,7 @@ pipeline {
             steps {
                 checkout scm 
                 script {
-                    // getting commit msg safely
+                    // Capture commit message into an ENV variable for use in shell later
                     env.GIT_COMMIT_MSG = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
                 }
                 echo "✅ Processing Branch: ${env.BRANCH_NAME}"
@@ -24,17 +24,13 @@ pipeline {
 
         stage('Security: Secrets Detection') {
             steps {
-                script {
-                    sh 'gitleaks detect --source . --report-path gitleaks-report.json --verbose --redact || true'
-                }
+                sh 'gitleaks detect --source . --report-path gitleaks-report.json --verbose --redact || true'
             }
         }
 
         stage('Security: Infrastructure & FS Scan') {
             steps {
-                script {
-                    sh 'trivy fs . --format table --exit-code 0'
-                }
+                sh 'trivy fs . --format table --exit-code 0'
             }
         }
 
@@ -85,72 +81,29 @@ pipeline {
         }
 
         // ===========================================
-        //      EXECUTIVE REPORTING
+        //      EXECUTIVE REPORTING (SHELL METHOD)
         // ===========================================
 
         stage('Generate Executive Report') {
             steps {
                 script {
-                    // 1. Get raw data strings
-                    String buildStatus = currentBuild.currentResult ?: 'SUCCESS'
-                    String jobName = env.JOB_NAME
-                    String buildNum = env.BUILD_NUMBER
-                    String branch = env.BRANCH_NAME
-                    String url = env.BUILD_URL
-                    String commit = env.GIT_COMMIT_MSG ?: 'N/A'
+                    // Set variables for the shell script
+                    env.REPORT_DATE = sh(returnStdout: true, script: 'date "+%Y-%m-%d %H:%M"').trim()
+                    env.BUILD_STATUS = currentBuild.currentResult ?: 'SUCCESS'
                     
-                    // 2. Generate Date using Shell (Safer than Java Date in Jenkins)
-                    String dateStr = sh(returnStdout: true, script: 'date "+%Y-%m-%d %H:%M"').trim()
-
-                    // 3. Call the @NonCPS function to generate the HTML string
-                    String htmlContent = generateHtmlReport(jobName, buildNum, branch, dateStr, buildStatus, commit, url)
-                    
-                    // 4. Write to file
-                    writeFile file: 'pipeline-report.html', text: htmlContent
+                    // Determine colors using shell logic variables
+                    if (env.BUILD_STATUS == 'FAILURE') {
+                        env.STATUS_COLOR = '#c0392b' // Red
+                        env.BADGE_CLASS = 'badge-danger'
+                    } else {
+                        env.STATUS_COLOR = '#27ae60' // Green
+                        env.BADGE_CLASS = 'badge-success'
+                    }
                 }
-            }
-            post {
-                always {
-                    publishHTML([
-                        allowMissing: false,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: '',
-                        reportFiles: 'pipeline-report.html',
-                        reportName: 'Security Compliance Report'
-                    ])
-                }
-            }
-        }
-    }
 
-    post {
-        success {
-            mail to: 'cirin.chalghoumi@gmail.com',
-                subject: "✅ PASSED: ${env.JOB_NAME} - Branch ${env.BRANCH_NAME}",
-                body: "Pipeline Success. Report: ${env.BUILD_URL}Security_20Compliance_20Report/"
-        }
-        failure {
-            mail to: 'cirin.chalghoumi@gmail.com',
-                subject: "❌ FAILED: ${env.JOB_NAME} - Branch ${env.BRANCH_NAME}",
-                body: "Pipeline Failed. Logs: ${env.BUILD_URL}"
-        }
-    }
-}
-
-// ========================================================================
-//  HELPER FUNCTION - MUST BE OUTSIDE THE PIPELINE BLOCK
-//  @NonCPS prevents the "SandboxContinuable" crash by disabling state saving
-// ========================================================================
-@NonCPS
-def generateHtmlReport(String jobName, String buildNum, String branchName, String dateStr, String buildStatus, String commitMsg, String buildUrl) {
-    
-    // Logic to determine colors
-    String statusColor = (buildStatus == 'FAILURE') ? '#c0392b' : '#27ae60' // Red or Green
-    String statusBadgeClass = (buildStatus == 'FAILURE') ? 'badge-danger' : 'badge-success'
-
-    // The HTML String
-    return """
+                // Generate HTML using Linux 'cat' (Bypasses Groovy CPS issues)
+                sh '''
+cat <<EOF > pipeline-report.html
 <!DOCTYPE html>
 <html>
 <head>
@@ -179,17 +132,17 @@ def generateHtmlReport(String jobName, String buildNum, String branchName, Strin
         <div class="summary-grid">
             <div class="card">
                 <h3>Build Information</h3>
-                <p><strong>Job:</strong> ${jobName}</p>
-                <p><strong>Build ID:</strong> #${buildNum}</p>
-                <p><strong>Branch:</strong> ${branchName}</p>
-                <p><strong>Date:</strong> ${dateStr}</p>
+                <p><strong>Job:</strong> ${JOB_NAME}</p>
+                <p><strong>Build ID:</strong> #${BUILD_NUMBER}</p>
+                <p><strong>Branch:</strong> ${BRANCH_NAME}</p>
+                <p><strong>Date:</strong> ${REPORT_DATE}</p>
             </div>
-            <div class="card" style="border-left-color: ${statusColor}">
+            <div class="card" style="border-left-color: ${STATUS_COLOR}">
                 <h3>Overall Status</h3>
                 <div style="font-size: 24px; margin-top: 10px;">
-                    <span class="badge ${statusBadgeClass}">${buildStatus}</span>
+                    <span class="badge ${BADGE_CLASS}">${BUILD_STATUS}</span>
                 </div>
-                <p><small>Commit: ${commitMsg}</small></p>
+                <p><small>Commit: ${GIT_COMMIT_MSG}</small></p>
             </div>
         </div>
 
@@ -239,10 +192,26 @@ def generateHtmlReport(String jobName, String buildNum, String branchName, Strin
 
         <div class="footer">
             <p>Generated automatically by Jenkins CI/CD Pipeline</p>
-            <p><a href="${buildUrl}">View Full Console Logs</a> | <a href="${buildUrl}testReport/">View Test Results</a></p>
+            <p><a href="${BUILD_URL}">View Full Console Logs</a> | <a href="${BUILD_URL}testReport/">View Test Results</a></p>
         </div>
     </div>
 </body>
 </html>
-    """
+EOF
+                '''
+            }
+            post {
+                always {
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: '',
+                        reportFiles: 'pipeline-report.html',
+                        reportName: 'Security Compliance Report'
+                    ])
+                }
+            }
+        }
+    }
 }
