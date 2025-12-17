@@ -90,7 +90,7 @@ pipeline {
                 // 1. Pass Groovy variables to the Shell Environment
                 // Jenkins handles this easily.
                 withEnv([
-                    "BUILD_RES=${currentBuild.currentResult ?: 'SUCCESS'}",
+                    "BUILD_RES=${currentBuild.result ?: 'SUCCESS'}",
                     "JOB=${env.JOB_NAME}",
                     "ID=${env.BUILD_NUMBER}",
                     "BRANCH=${env.BRANCH_NAME}",
