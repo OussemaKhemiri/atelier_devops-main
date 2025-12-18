@@ -92,15 +92,16 @@ pipeline {
         stage('Security: Advanced SAST (Semgrep)') {
             steps {
                 script {
-                    // 1. Initialize an empty JSON to prevent "File not found" errors
+                    // 1. Initialize empty report to prevent crashes
                     sh 'echo "{}" > semgrep-report.json'
                     
-                    // 2. Run Semgrep
-                    // We look in standard paths including snap
-                    sh '''
-                        export PATH=$PATH:/snap/bin:/usr/local/bin
-                        semgrep scan --config=auto --json --output=semgrep-report.json || true
-                    '''
+                    // 2. Run Semgrep (Standard Path)
+                    // We use || true so the build doesn't fail on findings
+                    sh 'semgrep scan --config=auto --json --output=semgrep-report.json || true'
+                    
+                    // 3. Optional: Print summary to console for debugging
+                    sh 'echo "Semgrep Scan Complete. Checking report size..."'
+                    sh 'ls -lh semgrep-report.json'
                 }
             }
         }
