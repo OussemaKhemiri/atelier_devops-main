@@ -129,15 +129,18 @@ pipeline {
                     "URL=${env.BUILD_URL}"
                 ]) {
                     sh '''
-                        #!/bin/bash
+                        #!/bin/sh
                         
                         # --- 1. PARSE METRICS ---
                         DATE_STR=$(date "+%Y-%m-%d %H:%M")
                         
-                        # Grype: Count Vulnerabilities from JSON
+                        # Grype: Count Vulnerabilities (using grep count)
+                        # We use || true to prevent failure if grep finds nothing (exit code 1)
                         GRYPE_CRITICAL=$(grep -o '"severity":"Critical"' grype-report.json | wc -l)
                         GRYPE_HIGH=$(grep -o '"severity":"High"' grype-report.json | wc -l)
                         GRYPE_MEDIUM=$(grep -o '"severity":"Medium"' grype-report.json | wc -l)
+                        
+                        # Calculate Total (Standard Arithmetic)
                         TOTAL_VULN=$((GRYPE_CRITICAL + GRYPE_HIGH + GRYPE_MEDIUM))
 
                         # Syft: Count Packages
@@ -146,14 +149,47 @@ pipeline {
                         # Checkstyle: Count Errors
                         STYLE_ERRORS=$(grep -o '<error' checkstyle-result.xml | wc -l)
                         
-                        # --- 2. DETERMINE STATUS COLORS ---
-                        if [ "$BUILD_RES" == "FAILURE" ]; then
+                        # --- 2. CALCULATE LOGIC (SHELL COMPATIBLE) ---
+                        
+                        # Build Status Logic
+                        if [ "$BUILD_RES" = "FAILURE" ]; then
                             HEADER_BG="linear-gradient(135deg, #c0392b, #e74c3c)"
                             STATUS_ICON="❌"
                         else
                             HEADER_BG="linear-gradient(135deg, #27ae60, #2ecc71)"
                             STATUS_ICON="✅"
                         fi
+
+                        # Vulnerability Text Color Logic
+                        if [ "$TOTAL_VULN" -gt 0 ]; then
+                            VULN_TEXT_COLOR="#c0392b"
+                            VULN_BADGE_CLASS="b-warn"
+                        else
+                            VULN_TEXT_COLOR="#27ae60"
+                            VULN_BADGE_CLASS="b-secure"
+                        fi
+
+                        # Checkstyle Badge Logic
+                        if [ "$STYLE_ERRORS" -gt 0 ]; then
+                            STYLE_BADGE_CLASS="b-warn"
+                            STYLE_BADGE_TEXT="${STYLE_ERRORS} ISSUES"
+                        else
+                            STYLE_BADGE_CLASS="b-secure"
+                            STYLE_BADGE_TEXT="PASSED"
+                        fi
+
+                        # Supply Chain Badge Logic
+                        if [ "$TOTAL_VULN" -gt 0 ]; then
+                            SUPPLY_BADGE_TEXT="${TOTAL_VULN} VULNS"
+                        else
+                            SUPPLY_BADGE_TEXT="SECURE"
+                        fi
+
+                        # Width Logic for Charts (Simple multiplication by string concatenation)
+                        # We clamp usage to avoid breaking layout if numbers are huge
+                        W_CRIT="${GRYPE_CRITICAL}0"
+                        W_HIGH="${GRYPE_HIGH}0"
+                        W_MED="${GRYPE_MEDIUM}0"
 
                         # --- 3. GENERATE HTML ---
                         cat > pipeline-report.html <<EOF
@@ -169,7 +205,6 @@ pipeline {
         .header p { opacity: 0.9; margin-top: 5px; }
         .container { max-width: 1100px; margin: -30px auto 40px; padding: 0 20px; }
         
-        /* Cards & Grid */
         .card { background: white; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 25px; margin-bottom: 25px; }
         .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
         .metric-box { text-align: center; padding: 15px; border-right: 1px solid #eee; }
@@ -177,13 +212,8 @@ pipeline {
         .metric-val { display: block; font-size: 2rem; font-weight: bold; color: #2c3e50; }
         .metric-lbl { font-size: 0.85rem; text-transform: uppercase; color: #7f8c8d; letter-spacing: 1px; }
 
-        /* Vulnerability Bar */
         .vuln-bar { display: flex; height: 20px; border-radius: 10px; overflow: hidden; margin-top: 10px; background: #eee; }
-        .vb-crit { background: #c0392b; width: 0%; } 
-        .vb-high { background: #e67e22; width: 0%; }
-        .vb-med  { background: #f1c40f; width: 0%; }
         
-        /* Table Styles */
         table { width: 100%; border-collapse: collapse; margin-top: 15px; }
         th { text-align: left; padding: 12px; background: #34495e; color: white; font-size: 0.9rem; }
         td { padding: 12px; border-bottom: 1px solid #ecf0f1; }
@@ -213,7 +243,7 @@ pipeline {
                     <span class="metric-lbl">Assets Tracked (SBOM)</span>
                 </div>
                 <div class="metric-box">
-                    <span class="metric-val" style="color:${TOTAL_VULN > 0 ? '#c0392b' : '#27ae60'}">${TOTAL_VULN}</span>
+                    <span class="metric-val" style="color:${VULN_TEXT_COLOR}">${TOTAL_VULN}</span>
                     <span class="metric-lbl">Supply Chain Risks</span>
                 </div>
                 <div class="metric-box">
@@ -222,14 +252,12 @@ pipeline {
                 </div>
             </div>
             
-            <!-- Fake Progress Bar Logic for Visuals -->
             <div style="margin-top: 25px;">
                 <span style="font-size:0.9rem; font-weight:bold;">Vulnerability Severity Distribution</span>
                 <div class="vuln-bar">
-                    <div style="width:${GRYPE_CRITICAL}0px; background:#c0392b;" title="Critical"></div>
-                    <div style="width:${GRYPE_HIGH}0px; background:#e67e22;" title="High"></div>
-                    <div style="width:${GRYPE_MEDIUM}0px; background:#f1c40f;" title="Medium"></div>
-                    <div style="flex-grow:1; background:#eee;"></div>
+                    <div style="width:${W_CRIT}px; background:#c0392b;" title="Critical"></div>
+                    <div style="width:${W_HIGH}px; background:#e67e22;" title="High"></div>
+                    <div style="width:${W_MED}px; background:#f1c40f;" title="Medium"></div>
                 </div>
                 <div style="font-size:0.75rem; color:#888; margin-top:5px;">
                     Critical: ${GRYPE_CRITICAL} | High: ${GRYPE_HIGH} | Medium: ${GRYPE_MEDIUM}
@@ -259,8 +287,8 @@ pipeline {
                     <tr>
                         <td><strong>Code Standards</strong></td>
                         <td>Checkstyle (Google)</td>
-                        <td>Formatting, Naming, Javadoc Compliance</td>
-                        <td><span class="badge ${STYLE_ERRORS == 0 ? 'b-secure' : 'b-warn'}">${STYLE_ERRORS} ISSUES</span></td>
+                        <td>Formatting, Naming, Javadoc</td>
+                        <td><span class="badge ${STYLE_BADGE_CLASS}">${STYLE_BADGE_TEXT}</span></td>
                     </tr>
                     <tr>
                         <td><strong>Infrastructure</strong></td>
@@ -272,12 +300,12 @@ pipeline {
                         <td><strong>Supply Chain</strong></td>
                         <td>Syft + Grype</td>
                         <td>Dependency Inventory & CVE Scan</td>
-                        <td><span class="badge ${TOTAL_VULN == 0 ? 'b-secure' : 'b-warn'}">${TOTAL_VULN} VULNS</span></td>
+                        <td><span class="badge ${VULN_BADGE_CLASS}">${SUPPLY_BADGE_TEXT}</span></td>
                     </tr>
                     <tr>
                         <td><strong>App Security</strong></td>
                         <td>SonarQube</td>
-                        <td>Logic Flaws, Bugs & hotspots</td>
+                        <td>Logic Flaws, Bugs & Hotspots</td>
                         <td><span class="badge b-info">ANALYZED</span></td>
                     </tr>
                 </tbody>
@@ -293,7 +321,7 @@ pipeline {
         </div>
 
         <div class="footer">
-            Report Generated by Jenkins CI/CD | Author: ${env.AUTHOR} | Commit: ${env.COMMIT_HASH}
+            Report Generated by Jenkins CI/CD on ${DATE_STR}
         </div>
     </div>
 </body>
@@ -302,21 +330,5 @@ EOF
                     '''
                 }
             }
-            post {
-                always {
-                    // Archive the valuable JSON reports
-                    archiveArtifacts artifacts: 'sbom.json, grype-report.json, checkstyle-result.xml', allowEmptyArchive: true
-                    
-                    publishHTML([
-                        allowMissing: false,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: '',
-                        reportFiles: 'pipeline-report.html',
-                        reportName: 'Enterprise Compliance Report'
-                    ])
-                }
-            }
-        }
     }
 }
