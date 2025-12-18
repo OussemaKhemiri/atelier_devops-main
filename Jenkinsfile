@@ -65,19 +65,25 @@ pipeline {
         //      PHASE 4: CODE QUALITY & COMPLIANCE
         // ===========================================
 
-        stage('Compliance: Google Standards') {
+       stage('Compliance: Google Standards') {
             steps {
                 script {
-                    // 1. Run Checkstyle on src/main/java
-                    // We use '|| true' to prevent pipeline failure if style issues are found
-                    sh 'checkstyle src/main/java -f xml -o checkstyle-result.xml || true'
+                    echo "🔍 Running Checkstyle Analysis..."
                     
-                    // 2. SAFETY CHECK: Ensure the XML is valid to prevent "XML Parsing Error"
-                    // If file is empty or missing, create a dummy empty report
+                    // 1. Run Java directly (Bypassing aliases to avoid Path issues)
+                    // We use '|| true' so the build doesn't stop if we find style errors
+                    sh '''
+                        java -jar /opt/checkstyle/checkstyle-10.12.5-all.jar \
+                        -c /opt/checkstyle/google_checks.xml \
+                        src/main/java \
+                        -f xml -o checkstyle-result.xml || true
+                    '''
+                    
+                    // 2. SAFETY CHECK: If the file is still missing/empty, create the dummy
                     sh '''
                         if [ ! -s checkstyle-result.xml ]; then
-                            echo "<?xml version=\\"1.0\\"?><checkstyle version=\\"10.0\\"></checkstyle>" > checkstyle-result.xml
-                            echo "⚠️ Checkstyle produced no output, generated default XML."
+                            echo '<?xml version="1.0"?><checkstyle version="10.0"></checkstyle>' > checkstyle-result.xml
+                            echo "⚠️ Checkstyle failed to run. Generated empty report."
                         fi
                     '''
                 }
