@@ -91,8 +91,17 @@ pipeline {
 
         stage('Security: Advanced SAST (Semgrep)') {
             steps {
-                // Semgrep: Scans for OWASP Top 10 and Logic Bugs
-                sh 'semgrep scan --config=auto --json --output=semgrep-report.json || true'
+                script {
+                    // 1. Initialize an empty JSON to prevent "File not found" errors
+                    sh 'echo "{}" > semgrep-report.json'
+                    
+                    // 2. Run Semgrep
+                    // We look in standard paths including snap
+                    sh '''
+                        export PATH=$PATH:/snap/bin:/usr/local/bin
+                        semgrep scan --config=auto --json --output=semgrep-report.json || true
+                    '''
+                }
             }
         }
 
@@ -146,7 +155,7 @@ pipeline {
                         #!/bin/sh
                         
                         # --- 1. DATA GATHERING ---
-                        DATE_STR=$(date "+%Y-%m-%d %H:%M")
+                        # We use || true for grep to prevent script failure if counts are 0
                         
                         # Syft & Grype Stats
                         PKG_COUNT=$(grep -o '"name":' sbom.json | wc -l)
@@ -162,11 +171,11 @@ pipeline {
                         DOCKER_ISSUES=$(grep -o '"level":' hadolint-report.json | wc -l)
 
                         # Semgrep (Security Findings)
-                        # We use simple grep logic to count "start" which indicates a finding in Semgrep JSON
                         SEMGREP_ISSUES=$(grep -o '"start":' semgrep-report.json | wc -l)
 
-                        # --- 2. REPORT LOGIC ---
+                        # --- 2. REPORT LOGIC (CALCULATE COLORS HERE) ---
                         
+                        # Build Status
                         if [ "$BUILD_RES" = "FAILURE" ]; then
                             HEADER_BG="linear-gradient(135deg, #c0392b, #e74c3c)"
                             ICON="🚫"
@@ -175,14 +184,28 @@ pipeline {
                             ICON="🛡️"
                         fi
 
-                        # Dynamic Badges
-                        if [ "$TOTAL_VULN" -gt 0 ]; then VULN_CLASS="b-warn"; else VULN_CLASS="b-secure"; fi
-                        if [ "$STYLE_ERRORS" -gt 0 ]; then STYLE_CLASS="b-warn"; else STYLE_CLASS="b-secure"; fi
+                        # Total Vuln Color (Fixing the Bad Substitution)
+                        if [ "$TOTAL_VULN" -gt 0 ]; then
+                            COLOR_VULN="#c0392b"
+                            VULN_CLASS="b-warn"
+                        else
+                            COLOR_VULN="#27ae60"
+                            VULN_CLASS="b-secure"
+                        fi
+
+                        # Docker Color
                         if [ "$DOCKER_ISSUES" -gt 0 ]; then DOCKER_CLASS="b-warn"; else DOCKER_CLASS="b-secure"; fi
+
+                        # Semgrep Color
                         if [ "$SEMGREP_ISSUES" -gt 0 ]; then SEMGREP_CLASS="b-warn"; else SEMGREP_CLASS="b-secure"; fi
 
-                        # Chart Widths
-                        W_CRIT="${CRIT}0"; W_HIGH="${HIGH}0"; W_MED="${MED}0"
+                        # Checkstyle Color
+                        if [ "$STYLE_ERRORS" -gt 0 ]; then STYLE_CLASS="b-warn"; else STYLE_CLASS="b-secure"; fi
+
+                        # Chart Widths (Visual Only)
+                        W_CRIT="${CRIT}0"
+                        W_HIGH="${HIGH}0"
+                        W_MED="${MED}0"
 
                         # --- 3. HTML GENERATION ---
                         cat > pipeline-report.html <<EOF
@@ -226,7 +249,6 @@ pipeline {
 
     <div class="container">
         
-        <!-- High Level Stats -->
         <div class="card">
             <h3 style="margin-top:0; color:#2c3e50;">Executive Summary</h3>
             <div class="stats-grid">
@@ -235,7 +257,7 @@ pipeline {
                     <span class="stat-lbl">Components</span>
                 </div>
                 <div class="stat-item">
-                    <span class="stat-val" style="color:${TOTAL_VULN > 0 ? '#c0392b' : '#27ae60'}">${TOTAL_VULN}</span>
+                    <span class="stat-val" style="color:${COLOR_VULN}">${TOTAL_VULN}</span>
                     <span class="stat-lbl">CVE Risks</span>
                 </div>
                 <div class="stat-item">
@@ -261,7 +283,6 @@ pipeline {
             </div>
         </div>
 
-        <!-- Compliance Matrix -->
         <div class="card">
             <h3 style="margin-top:0; color:#2c3e50;">🛡️ Security Control Gates</h3>
             <table>
@@ -281,7 +302,7 @@ pipeline {
                         <td><span class="badge b-secure">PASSED</span></td>
                     </tr>
                     <tr>
-                        <td><strong>Infrastructure (IaC)</strong></td>
+                        <td><strong>Infrastructure</strong></td>
                         <td>Trivy + Hadolint</td>
                         <td>OS Hardening & Dockerfile Compliance</td>
                         <td><span class="badge ${DOCKER_CLASS}">CHECKED: ${DOCKER_ISSUES}</span></td>
@@ -304,12 +325,6 @@ pipeline {
                         <td>Syntax & Formatting Standards</td>
                         <td><span class="badge ${STYLE_CLASS}">${STYLE_ERRORS} ISSUES</span></td>
                     </tr>
-                    <tr>
-                        <td><strong>Deep Analysis</strong></td>
-                        <td>SonarQube</td>
-                        <td>Cyclomatic Complexity & Bugs</td>
-                        <td><span class="badge b-info">UPLOADED</span></td>
-                    </tr>
                 </tbody>
             </table>
         </div>
@@ -327,9 +342,7 @@ EOF
             }
             post {
                 always {
-                    // Archive ALL reports
                     archiveArtifacts artifacts: '*.json, *.xml, *.html', allowEmptyArchive: true
-                    
                     publishHTML([
                         allowMissing: false,
                         alwaysLinkToLastBuild: true,
