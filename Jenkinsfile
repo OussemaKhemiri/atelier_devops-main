@@ -86,16 +86,22 @@ pipeline {
         // ===========================================
 
         stage('Generate Executive Report') {
-            steps {
-                // 1. Pass Groovy variables to the Shell Environment
-                // Jenkins handles this easily.
-                withEnv([
-                    "BUILD_RES=${currentBuild.result ?: 'SUCCESS'}",
-                    "JOB=${env.JOB_NAME}",
-                    "ID=${env.BUILD_NUMBER}",
-                    "BRANCH=${env.BRANCH_NAME}",
-                    "URL=${env.BUILD_URL}"
-                ]) {
+	            steps {
+	                script {
+	                    // Safely determine the current build result and set an environment variable
+	                    // This is more robust against Groovy Sandbox security restrictions.
+	                    def buildResult = currentBuild.result ?: 'SUCCESS'
+	                    env.BUILD_RES = buildResult.toString()
+	                }
+	                
+	                // 1. Pass Groovy variables to the Shell Environment
+	                // Jenkins handles this easily.
+	                withEnv([
+	                    "JOB=${env.JOB_NAME}",
+	                    "ID=${env.BUILD_NUMBER}",
+	                    "BRANCH=${env.BRANCH_NAME}",
+	                    "URL=${env.BUILD_URL}"
+	                ]) {
                     // 2. Run Shell Script
                     // Use SINGLE QUOTES (''') so Jenkins doesn't touch the internal variables.
                     sh '''
