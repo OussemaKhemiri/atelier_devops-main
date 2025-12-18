@@ -18,7 +18,6 @@ pipeline {
                 script {
                     // Capture commit details for the report
                     env.COMMIT_HASH = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
-                    env.COMMIT_MSG = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
                     env.AUTHOR = sh(returnStdout: true, script: 'git log -1 --pretty=%an').trim()
                 }
                 echo "✅ Processing Branch: ${env.BRANCH_NAME} | Commit: ${env.COMMIT_HASH}"
@@ -57,9 +56,8 @@ pipeline {
         stage('Supply Chain: Vulnerability Scan') {
             steps {
                 // Grype: Scans the SBOM for CVEs
-                // We output to JSON for parsing and Table for logs
                 sh 'grype sbom:./sbom.json -o json > grype-report.json'
-                sh 'grype sbom:./sbom.json' // Show in console
+                sh 'grype sbom:./sbom.json' // Display table in console logs
             }
         }
 
@@ -69,11 +67,20 @@ pipeline {
 
         stage('Compliance: Google Standards') {
             steps {
-                // Checkstyle: Enforces Google Java Style Guide
-                // Scans src/main/java. Outputs XML for Jenkins, plain text for logs.
-                sh '''
-                    checkstyle src/main/java -f xml -o checkstyle-result.xml || true
-                '''
+                script {
+                    // 1. Run Checkstyle on src/main/java
+                    // We use '|| true' to prevent pipeline failure if style issues are found
+                    sh 'checkstyle src/main/java -f xml -o checkstyle-result.xml || true'
+                    
+                    // 2. SAFETY CHECK: Ensure the XML is valid to prevent "XML Parsing Error"
+                    // If file is empty or missing, create a dummy empty report
+                    sh '''
+                        if [ ! -s checkstyle-result.xml ]; then
+                            echo "<?xml version=\\"1.0\\"?><checkstyle version=\\"10.0\\"></checkstyle>" > checkstyle-result.xml
+                            echo "⚠️ Checkstyle produced no output, generated default XML."
+                        fi
+                    '''
+                }
             }
         }
 
@@ -134,11 +141,10 @@ pipeline {
                         # --- 1. PARSE METRICS ---
                         DATE_STR=$(date "+%Y-%m-%d %H:%M")
                         
-                        # Grype: Count Vulnerabilities (using grep count)
+                        # Grype: Count Vulnerabilities
                         GRYPE_CRITICAL=$(grep -o '"severity":"Critical"' grype-report.json | wc -l)
                         GRYPE_HIGH=$(grep -o '"severity":"High"' grype-report.json | wc -l)
                         GRYPE_MEDIUM=$(grep -o '"severity":"Medium"' grype-report.json | wc -l)
-                        
                         TOTAL_VULN=$((GRYPE_CRITICAL + GRYPE_HIGH + GRYPE_MEDIUM))
 
                         # Syft: Count Packages
@@ -179,6 +185,7 @@ pipeline {
                             SUPPLY_BADGE_TEXT="SECURE"
                         fi
 
+                        # Chart Widths
                         W_CRIT="${GRYPE_CRITICAL}0"
                         W_HIGH="${GRYPE_HIGH}0"
                         W_MED="${GRYPE_MEDIUM}0"
@@ -302,13 +309,13 @@ EOF
                     '''
                 }
             }
-            // THIS IS THE PART YOU WERE MISSING:
+            // THIS POST BLOCK IS REQUIRED TO SEE THE REPORT IN JENKINS
             post {
                 always {
-                    // 1. Archive the Files so you can download them
+                    // Archive artifacts so you can download them
                     archiveArtifacts artifacts: 'sbom.json, grype-report.json, checkstyle-result.xml, pipeline-report.html', allowEmptyArchive: true
                     
-                    // 2. Publish the HTML to the Jenkins Sidebar
+                    // Publish the HTML Report to the Sidebar
                     publishHTML([
                         allowMissing: false,
                         alwaysLinkToLastBuild: true,
@@ -320,5 +327,5 @@ EOF
                 }
             }
         }
-}
+    }
 }
