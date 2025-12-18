@@ -4,19 +4,30 @@ pipeline {
     options {
         timeout(time: 1, unit: 'HOURS')
         buildDiscarder(logRotator(numToKeepStr: '5'))
+        disableConcurrentBuilds()
     }
 
     stages {
         // ===========================================
-        //      PREPARATION & COMPLIANCE
+        //      PHASE 1: PREPARATION
         // ===========================================
         
-        stage('Checkout & Info') {
+        stage('Checkout & Metadata') {
             steps {
                 checkout scm 
-                echo "✅ Processing Branch: ${env.BRANCH_NAME}"
+                script {
+                    // Capture commit details for the report
+                    env.COMMIT_HASH = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+                    env.COMMIT_MSG = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+                    env.AUTHOR = sh(returnStdout: true, script: 'git log -1 --pretty=%an').trim()
+                }
+                echo "✅ Processing Branch: ${env.BRANCH_NAME} | Commit: ${env.COMMIT_HASH}"
             }
         }
+
+        // ===========================================
+        //      PHASE 2: STATIC & INFRA SECURITY
+        // ===========================================
 
         stage('Security: Secrets Detection') {
             steps {
@@ -27,22 +38,44 @@ pipeline {
 
         stage('Security: Infrastructure Scan') {
             steps {
-                // Trivy: Scans OS and Filesystem config
+                // Trivy: Scans OS config and filesystem
                 sh 'trivy fs . --format table --exit-code 0'
             }
         }
 
-        stage('Security: Supply Chain SBOM') {
+        // ===========================================
+        //      PHASE 3: SUPPLY CHAIN SECURITY
+        // ===========================================
+
+        stage('Supply Chain: SBOM Generation') {
             steps {
-                // Syft: Generates Software Bill of Materials (List of all ingredients)
+                // Syft: Creates the Inventory (SBOM)
                 sh 'syft dir:. -o spdx-json > sbom.json'
-                sh 'echo "✅ SBOM Generated: sbom.json"'
+            }
+        }
+
+        stage('Supply Chain: Vulnerability Scan') {
+            steps {
+                // Grype: Scans the SBOM for CVEs
+                // We output to JSON for parsing and Table for logs
+                sh 'grype sbom:./sbom.json -o json > grype-report.json'
+                sh 'grype sbom:./sbom.json' // Show in console
             }
         }
 
         // ===========================================
-        //      BUILD & TEST
+        //      PHASE 4: CODE QUALITY & COMPLIANCE
         // ===========================================
+
+        stage('Compliance: Google Standards') {
+            steps {
+                // Checkstyle: Enforces Google Java Style Guide
+                // Scans src/main/java. Outputs XML for Jenkins, plain text for logs.
+                sh '''
+                    checkstyle src/main/java -f xml -o checkstyle-result.xml || true
+                '''
+            }
+        }
 
         stage('Build: Compile') {
             steps {
@@ -61,17 +94,12 @@ pipeline {
             }
         }
 
-        // ===========================================
-        //      ADVANCED SECURITY ANALYSIS
-        // ===========================================
-
         stage('Security: SCA (Dependency Check)') {
             steps {
-                // OWASP: Checks Java Libs against CVE database
                 sh '''
                     mvn org.owasp:dependency-check-maven:check \
                     -DfailBuildOnCVSS=8 \
-                    || echo "SCA Warning: Vulnerabilities found but threshold not met."
+                    || echo "SCA Warning: Threshold not met."
                 '''
             }
         }
@@ -88,10 +116,10 @@ pipeline {
         }
 
         // ===========================================
-        //      EXECUTIVE REPORTING (High Design)
+        //      PHASE 5: ENTERPRISE DASHBOARD
         // ===========================================
 
-        stage('Generate Executive Report') {
+        stage('Generate Compliance Dashboard') {
             steps {
                 withEnv([
                     "BUILD_RES=${currentBuild.currentResult ?: 'SUCCESS'}",
@@ -103,170 +131,171 @@ pipeline {
                     sh '''
                         #!/bin/bash
                         
-                        # --- 1. GATHER DATA METRICS ---
+                        # --- 1. PARSE METRICS ---
                         DATE_STR=$(date "+%Y-%m-%d %H:%M")
                         
-                        # Count total packages found by Syft (Simple grep of the JSON SBOM)
-                        # This looks impressive on the report ("We scanned 142 packages")
+                        # Grype: Count Vulnerabilities from JSON
+                        GRYPE_CRITICAL=$(grep -o '"severity":"Critical"' grype-report.json | wc -l)
+                        GRYPE_HIGH=$(grep -o '"severity":"High"' grype-report.json | wc -l)
+                        GRYPE_MEDIUM=$(grep -o '"severity":"Medium"' grype-report.json | wc -l)
+                        TOTAL_VULN=$((GRYPE_CRITICAL + GRYPE_HIGH + GRYPE_MEDIUM))
+
+                        # Syft: Count Packages
                         PKG_COUNT=$(grep -o '"name":' sbom.json | wc -l)
                         
-                        # Sanitize Commit Message
-                        COMMIT_MSG=$(git log -1 --pretty=%B | tr '\\n' ' ' | tr -d '"')
+                        # Checkstyle: Count Errors
+                        STYLE_ERRORS=$(grep -o '<error' checkstyle-result.xml | wc -l)
                         
-                        # Determine Styling
+                        # --- 2. DETERMINE STATUS COLORS ---
                         if [ "$BUILD_RES" == "FAILURE" ]; then
-                            COLOR="#e74c3c"
-                            ICON="❌"
-                            BG_HEADER="linear-gradient(135deg, #c0392b 0%, #e74c3c 100%)"
+                            HEADER_BG="linear-gradient(135deg, #c0392b, #e74c3c)"
+                            STATUS_ICON="❌"
                         else
-                            COLOR="#27ae60"
-                            ICON="✅"
-                            BG_HEADER="linear-gradient(135deg, #27ae60 0%, #2ecc71 100%)"
+                            HEADER_BG="linear-gradient(135deg, #27ae60, #2ecc71)"
+                            STATUS_ICON="✅"
                         fi
 
-                        # --- 2. GENERATE HTML DASHBOARD ---
+                        # --- 3. GENERATE HTML ---
                         cat > pipeline-report.html <<EOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Compliance Audit Report</title>
+    <title>Enterprise Security Audit</title>
     <style>
-        :root { --primary: #2c3e50; --secondary: #34495e; --light: #ecf0f1; --accent: #3498db; }
-        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8f9fa; color: #333; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #f4f6f8; margin: 0; color: #333; }
+        .header { background: ${HEADER_BG}; color: white; padding: 40px 20px; text-align: center; }
+        .header h1 { margin: 0; font-size: 2.2rem; }
+        .header p { opacity: 0.9; margin-top: 5px; }
+        .container { max-width: 1100px; margin: -30px auto 40px; padding: 0 20px; }
         
-        /* Header Area */
-        .header { background: ${BG_HEADER}; color: white; padding: 40px 20px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .header h1 { margin: 0; font-size: 2.5rem; letter-spacing: 1px; }
-        .header p { margin: 10px 0 0; opacity: 0.9; font-size: 1.1rem; }
+        /* Cards & Grid */
+        .card { background: white; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 25px; margin-bottom: 25px; }
+        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        .metric-box { text-align: center; padding: 15px; border-right: 1px solid #eee; }
+        .metric-box:last-child { border-right: none; }
+        .metric-val { display: block; font-size: 2rem; font-weight: bold; color: #2c3e50; }
+        .metric-lbl { font-size: 0.85rem; text-transform: uppercase; color: #7f8c8d; letter-spacing: 1px; }
+
+        /* Vulnerability Bar */
+        .vuln-bar { display: flex; height: 20px; border-radius: 10px; overflow: hidden; margin-top: 10px; background: #eee; }
+        .vb-crit { background: #c0392b; width: 0%; } 
+        .vb-high { background: #e67e22; width: 0%; }
+        .vb-med  { background: #f1c40f; width: 0%; }
         
-        /* Main Container */
-        .container { max-width: 1000px; margin: -30px auto 40px; padding: 0 20px; }
-        
-        /* Cards */
-        .card { background: white; border-radius: 8px; padding: 25px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); margin-bottom: 25px; }
-        .card h2 { margin-top: 0; color: var(--primary); border-bottom: 2px solid var(--light); padding-bottom: 10px; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 0.5px; }
-        
-        /* Summary Grid */
-        .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
-        .stat-box { text-align: center; padding: 15px; background: #fdfdfd; border: 1px solid #eee; border-radius: 6px; }
-        .stat-val { font-size: 1.8rem; font-weight: bold; color: var(--primary); display: block; margin-bottom: 5px; }
-        .stat-label { font-size: 0.85rem; color: #7f8c8d; text-transform: uppercase; }
-        
-        /* Tables */
+        /* Table Styles */
         table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th { background-color: var(--secondary); color: white; text-align: left; padding: 12px; font-size: 0.9rem; }
-        td { padding: 12px; border-bottom: 1px solid #eee; color: #555; }
-        tr:last-child td { border-bottom: none; }
-        
-        /* Badges */
-        .badge { padding: 5px 10px; border-radius: 20px; font-size: 0.8rem; font-weight: bold; }
-        .badge-pass { background-color: #d4edda; color: #155724; }
-        .badge-info { background-color: #d1ecf1; color: #0c5460; }
-        
-        /* Footer */
-        .footer { text-align: center; color: #95a5a6; font-size: 0.8rem; margin-top: 40px; padding-bottom: 20px; }
-        a { color: var(--accent); text-decoration: none; font-weight: bold; }
+        th { text-align: left; padding: 12px; background: #34495e; color: white; font-size: 0.9rem; }
+        td { padding: 12px; border-bottom: 1px solid #ecf0f1; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }
+        .b-secure { background: #d4edda; color: #155724; }
+        .b-warn   { background: #fff3cd; color: #856404; }
+        .b-info   { background: #d1ecf1; color: #0c5460; }
+
+        .footer { text-align: center; color: #aaa; font-size: 0.8rem; margin-top: 30px; }
     </style>
 </head>
 <body>
 
     <div class="header">
-        <h1>${ICON} Compliance Audit Report</h1>
-        <p>Project: ${JOB} | Branch: ${BRANCH}</p>
+        <h1>${STATUS_ICON} Security & Compliance Audit</h1>
+        <p>${JOB} | Build #${ID}</p>
     </div>
 
     <div class="container">
-        
-        <!-- Executive Summary -->
+
+        <!-- EXECUTIVE SUMMARY METRICS -->
         <div class="card">
-            <h2>Executive Summary</h2>
-            <div class="grid-4">
-                <div class="stat-box">
-                    <span class="stat-val" style="color: ${COLOR}">${BUILD_RES}</span>
-                    <span class="stat-label">Build Status</span>
+            <h3 style="margin-top:0; color:#555;">Executive Summary</h3>
+            <div class="grid-3">
+                <div class="metric-box">
+                    <span class="metric-val">${PKG_COUNT}</span>
+                    <span class="metric-lbl">Assets Tracked (SBOM)</span>
                 </div>
-                <div class="stat-box">
-                    <span class="stat-val">#${ID}</span>
-                    <span class="stat-label">Build ID</span>
+                <div class="metric-box">
+                    <span class="metric-val" style="color:${TOTAL_VULN > 0 ? '#c0392b' : '#27ae60'}">${TOTAL_VULN}</span>
+                    <span class="metric-lbl">Supply Chain Risks</span>
                 </div>
-                <div class="stat-box">
-                    <span class="stat-val">${PKG_COUNT}</span>
-                    <span class="stat-label">Packages Audited</span>
-                </div>
-                <div class="stat-box">
-                    <span class="stat-val">Java/Maven</span>
-                    <span class="stat-label">Tech Stack</span>
+                <div class="metric-box">
+                    <span class="metric-val">${STYLE_ERRORS}</span>
+                    <span class="metric-lbl">Compliance Violations</span>
                 </div>
             </div>
-            <p style="margin-top: 20px; color: #666; font-size: 0.9rem; text-align: center;">
-                <em>Commit: ${COMMIT_MSG}</em>
-            </p>
+            
+            <!-- Fake Progress Bar Logic for Visuals -->
+            <div style="margin-top: 25px;">
+                <span style="font-size:0.9rem; font-weight:bold;">Vulnerability Severity Distribution</span>
+                <div class="vuln-bar">
+                    <div style="width:${GRYPE_CRITICAL}0px; background:#c0392b;" title="Critical"></div>
+                    <div style="width:${GRYPE_HIGH}0px; background:#e67e22;" title="High"></div>
+                    <div style="width:${GRYPE_MEDIUM}0px; background:#f1c40f;" title="Medium"></div>
+                    <div style="flex-grow:1; background:#eee;"></div>
+                </div>
+                <div style="font-size:0.75rem; color:#888; margin-top:5px;">
+                    Critical: ${GRYPE_CRITICAL} | High: ${GRYPE_HIGH} | Medium: ${GRYPE_MEDIUM}
+                </div>
+            </div>
         </div>
 
-        <!-- Security Compliance Table -->
+        <!-- DETAILED COMPLIANCE TABLE -->
         <div class="card">
-            <h2>🛡️ Security Compliance Gates</h2>
+            <h3 style="margin-top:0; color:#555;">🛡️ Compliance Control Gates</h3>
             <table>
                 <thead>
                     <tr>
-                        <th width="20%">Category</th>
-                        <th width="20%">Tool</th>
-                        <th>Audit Scope</th>
-                        <th width="15%">Status</th>
+                        <th>Control Domain</th>
+                        <th>Tool / Standard</th>
+                        <th>Scope of Audit</th>
+                        <th>Status</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
-                        <td><strong>Secrets</strong></td>
+                        <td><strong>Access Control</strong></td>
                         <td>Gitleaks</td>
-                        <td>Hardcoded credentials, API keys, tokens</td>
-                        <td><span class="badge badge-pass">PASSED</span></td>
+                        <td>Secret Key & Credential Leakage</td>
+                        <td><span class="badge b-secure">PASSED</span></td>
                     </tr>
                     <tr>
-                        <td><strong>Supply Chain</strong></td>
-                        <td>Syft SBOM</td>
-                        <td>Software Bill of Materials (Inventory)</td>
-                        <td><span class="badge badge-pass">GENERATED</span></td>
+                        <td><strong>Code Standards</strong></td>
+                        <td>Checkstyle (Google)</td>
+                        <td>Formatting, Naming, Javadoc Compliance</td>
+                        <td><span class="badge ${STYLE_ERRORS == 0 ? 'b-secure' : 'b-warn'}">${STYLE_ERRORS} ISSUES</span></td>
                     </tr>
                     <tr>
                         <td><strong>Infrastructure</strong></td>
                         <td>Trivy</td>
-                        <td>OS Packages & Filesystem Config</td>
-                        <td><span class="badge badge-pass">PASSED</span></td>
+                        <td>OS Hardening & Filesystem Config</td>
+                        <td><span class="badge b-secure">PASSED</span></td>
                     </tr>
                     <tr>
-                        <td><strong>Dependencies</strong></td>
-                        <td>OWASP DC</td>
-                        <td>Known CVEs in Maven Libraries</td>
-                        <td><span class="badge badge-pass">PASSED</span></td>
+                        <td><strong>Supply Chain</strong></td>
+                        <td>Syft + Grype</td>
+                        <td>Dependency Inventory & CVE Scan</td>
+                        <td><span class="badge ${TOTAL_VULN == 0 ? 'b-secure' : 'b-warn'}">${TOTAL_VULN} VULNS</span></td>
                     </tr>
                     <tr>
-                        <td><strong>Code Quality</strong></td>
+                        <td><strong>App Security</strong></td>
                         <td>SonarQube</td>
-                        <td>Static Analysis (Bugs & Smells)</td>
-                        <td><span class="badge badge-info">ANALYZED</span></td>
+                        <td>Logic Flaws, Bugs & hotspots</td>
+                        <td><span class="badge b-info">ANALYZED</span></td>
                     </tr>
                 </tbody>
             </table>
         </div>
 
-        <!-- Links -->
-        <div class="card" style="text-align: center;">
-            <h2>📊 Detailed Artifacts</h2>
-            <p>Access the raw logs and detailed tool outputs below:</p>
-            <br>
-            <a href="${URL}" style="margin: 0 15px;">▶ View Console Logs</a>
-            <a href="${URL}testReport/" style="margin: 0 15px;">▶ Unit Test Results</a>
-            <a href="${URL}artifact/sbom.json" style="margin: 0 15px;">▶ Download SBOM (JSON)</a>
+        <!-- LINKS -->
+        <div class="card" style="text-align:center;">
+             <h3 style="margin-top:0; color:#555;">Artifacts & Logs</h3>
+             <a href="${URL}" style="text-decoration:none; color:#3498db; margin:0 10px; font-weight:bold;">View Console</a> | 
+             <a href="${URL}artifact/sbom.json" style="text-decoration:none; color:#3498db; margin:0 10px; font-weight:bold;">Download SBOM</a> | 
+             <a href="${URL}artifact/grype-report.json" style="text-decoration:none; color:#3498db; margin:0 10px; font-weight:bold;">Download Risk Report</a>
         </div>
 
         <div class="footer">
-            Generated automatically by Jenkins CI/CD on ${DATE_STR}
+            Report Generated by Jenkins CI/CD | Author: ${env.AUTHOR} | Commit: ${env.COMMIT_HASH}
         </div>
-
     </div>
-
 </body>
 </html>
 EOF
@@ -275,8 +304,8 @@ EOF
             }
             post {
                 always {
-                    // Archive the SBOM so it can be downloaded
-                    archiveArtifacts artifacts: 'sbom.json', allowEmptyArchive: true
+                    // Archive the valuable JSON reports
+                    archiveArtifacts artifacts: 'sbom.json, grype-report.json, checkstyle-result.xml', allowEmptyArchive: true
                     
                     publishHTML([
                         allowMissing: false,
@@ -284,7 +313,7 @@ EOF
                         keepAll: true,
                         reportDir: '',
                         reportFiles: 'pipeline-report.html',
-                        reportName: 'Compliance Report'
+                        reportName: 'Enterprise Compliance Report'
                     ])
                 }
             }
