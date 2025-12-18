@@ -70,16 +70,16 @@ pipeline {
                 script {
                     echo "🔍 Running Checkstyle Analysis..."
                     
-                    // 1. Run Java directly (Bypassing aliases to avoid Path issues)
-                    // We use '|| true' so the build doesn't stop if we find style errors
+                    // FIX: We use '-c /google_checks.xml' to load the config bundled INSIDE the JAR.
+                    // This guarantees the config always matches the JAR version.
                     sh '''
                         java -jar /opt/checkstyle/checkstyle-10.12.5-all.jar \
-                        -c /opt/checkstyle/google_checks.xml \
+                        -c /google_checks.xml \
                         src/main/java \
                         -f xml -o checkstyle-result.xml || true
                     '''
                     
-                    // 2. SAFETY CHECK: If the file is still missing/empty, create the dummy
+                    // Safety check to prevent XML parsing errors if the tool crashes
                     sh '''
                         if [ ! -s checkstyle-result.xml ]; then
                             echo '<?xml version="1.0"?><checkstyle version="10.0"></checkstyle>' > checkstyle-result.xml
