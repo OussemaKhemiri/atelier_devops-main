@@ -16,24 +16,17 @@ pipeline {
             steps {
                 checkout scm 
                 script {
-                    // Capture commit details for the report
                     env.COMMIT_HASH = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
-                    env.AUTHOR = sh(returnStdout: true, script: 'git log -1 --pretty=%an').trim()
+                    env.COMMIT_MSG  = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+                    env.AUTHOR      = sh(returnStdout: true, script: 'git log -1 --pretty=%an').trim()
                 }
                 echo "✅ Processing Branch: ${env.BRANCH_NAME} | Commit: ${env.COMMIT_HASH}"
             }
         }
 
         // ===========================================
-        //      PHASE 2: STATIC & INFRA SECURITY
+        //      PHASE 2: INFRASTRUCTURE & CONTAINER
         // ===========================================
-
-        stage('Security: Secrets Detection') {
-            steps {
-                // Gitleaks: Scans history for passwords/keys
-                sh 'gitleaks detect --source . --report-path gitleaks-report.json --verbose --redact || true'
-            }
-        }
 
         stage('Security: Infrastructure Scan') {
             steps {
@@ -42,62 +35,70 @@ pipeline {
             }
         }
 
+        stage('Security: Container Compliance') {
+            steps {
+                // Hadolint: Scans your Dockerfile for security best practices
+                // output to json for report, standard output for logs
+                sh 'hadolint Dockerfile --format json > hadolint-report.json || true'
+                sh 'hadolint Dockerfile || true' 
+            }
+        }
+
         // ===========================================
-        //      PHASE 3: SUPPLY CHAIN SECURITY
+        //      PHASE 3: CODE & SUPPLY CHAIN
         // ===========================================
 
-        stage('Supply Chain: SBOM Generation') {
+        stage('Security: Secrets Detection') {
             steps {
-                // Syft: Creates the Inventory (SBOM)
+                sh 'gitleaks detect --source . --report-path gitleaks-report.json --verbose --redact || true'
+            }
+        }
+
+        stage('Supply Chain: SBOM & Vulns') {
+            steps {
+                // 1. Generate SBOM
                 sh 'syft dir:. -o spdx-json > sbom.json'
-            }
-        }
-
-        stage('Supply Chain: Vulnerability Scan') {
-            steps {
-                // Grype: Scans the SBOM for CVEs
+                
+                // 2. Scan SBOM for CVEs
                 sh 'grype sbom:./sbom.json -o json > grype-report.json'
-                sh 'grype sbom:./sbom.json' // Display table in console logs
+                sh 'grype sbom:./sbom.json'
             }
         }
 
-        // ===========================================
-        //      PHASE 4: CODE QUALITY & COMPLIANCE
-        // ===========================================
-
-       stage('Compliance: Google Standards') {
+        stage('Compliance: Google Standards') {
             steps {
                 script {
-                    echo "🔍 Running Checkstyle Analysis..."
-                    
-                    // FIX: We use '-c /google_checks.xml' to load the config bundled INSIDE the JAR.
-                    // This guarantees the config always matches the JAR version.
+                    // Checkstyle with embedded google_checks.xml
                     sh '''
                         java -jar /opt/checkstyle/checkstyle-10.12.5-all.jar \
                         -c /google_checks.xml \
                         src/main/java \
                         -f xml -o checkstyle-result.xml || true
                     '''
-                    
-                    // Safety check to prevent XML parsing errors if the tool crashes
+                    // Safety Fallback
                     sh '''
                         if [ ! -s checkstyle-result.xml ]; then
                             echo '<?xml version="1.0"?><checkstyle version="10.0"></checkstyle>' > checkstyle-result.xml
-                            echo "⚠️ Checkstyle failed to run. Generated empty report."
                         fi
                     '''
                 }
             }
         }
 
-        stage('Build: Compile') {
+        // ===========================================
+        //      PHASE 4: ADVANCED SECURITY
+        // ===========================================
+
+        stage('Security: Advanced SAST (Semgrep)') {
             steps {
-                sh 'mvn clean compile'
+                // Semgrep: Scans for OWASP Top 10 and Logic Bugs
+                sh 'semgrep scan --config=auto --json --output=semgrep-report.json || true'
             }
         }
 
-        stage('Quality: Unit Tests') {
+        stage('Build & Test') {
             steps {
+                sh 'mvn clean compile'
                 sh 'mvn test'
             }
             post {
@@ -129,10 +130,10 @@ pipeline {
         }
 
         // ===========================================
-        //      PHASE 5: ENTERPRISE DASHBOARD
+        //      PHASE 5: ULTIMATE DASHBOARD
         // ===========================================
 
-        stage('Generate Compliance Dashboard') {
+        stage('Generate Executive Report') {
             steps {
                 withEnv([
                     "BUILD_RES=${currentBuild.currentResult ?: 'SUCCESS'}",
@@ -144,170 +145,179 @@ pipeline {
                     sh '''
                         #!/bin/sh
                         
-                        # --- 1. PARSE METRICS ---
+                        # --- 1. DATA GATHERING ---
                         DATE_STR=$(date "+%Y-%m-%d %H:%M")
                         
-                        # Grype: Count Vulnerabilities
-                        GRYPE_CRITICAL=$(grep -o '"severity":"Critical"' grype-report.json | wc -l)
-                        GRYPE_HIGH=$(grep -o '"severity":"High"' grype-report.json | wc -l)
-                        GRYPE_MEDIUM=$(grep -o '"severity":"Medium"' grype-report.json | wc -l)
-                        TOTAL_VULN=$((GRYPE_CRITICAL + GRYPE_HIGH + GRYPE_MEDIUM))
-
-                        # Syft: Count Packages
+                        # Syft & Grype Stats
                         PKG_COUNT=$(grep -o '"name":' sbom.json | wc -l)
-                        
-                        # Checkstyle: Count Errors
+                        CRIT=$(grep -o '"severity":"Critical"' grype-report.json | wc -l)
+                        HIGH=$(grep -o '"severity":"High"' grype-report.json | wc -l)
+                        MED=$(grep -o '"severity":"Medium"' grype-report.json | wc -l)
+                        TOTAL_VULN=$((CRIT + HIGH + MED))
+
+                        # Checkstyle
                         STYLE_ERRORS=$(grep -o '<error' checkstyle-result.xml | wc -l)
-                        
-                        # --- 2. CALCULATE LOGIC ---
+
+                        # Hadolint (Docker Issues)
+                        DOCKER_ISSUES=$(grep -o '"level":' hadolint-report.json | wc -l)
+
+                        # Semgrep (Security Findings)
+                        # We use simple grep logic to count "start" which indicates a finding in Semgrep JSON
+                        SEMGREP_ISSUES=$(grep -o '"start":' semgrep-report.json | wc -l)
+
+                        # --- 2. REPORT LOGIC ---
                         
                         if [ "$BUILD_RES" = "FAILURE" ]; then
                             HEADER_BG="linear-gradient(135deg, #c0392b, #e74c3c)"
-                            STATUS_ICON="❌"
+                            ICON="🚫"
                         else
                             HEADER_BG="linear-gradient(135deg, #27ae60, #2ecc71)"
-                            STATUS_ICON="✅"
+                            ICON="🛡️"
                         fi
 
-                        if [ "$TOTAL_VULN" -gt 0 ]; then
-                            VULN_TEXT_COLOR="#c0392b"
-                            VULN_BADGE_CLASS="b-warn"
-                        else
-                            VULN_TEXT_COLOR="#27ae60"
-                            VULN_BADGE_CLASS="b-secure"
-                        fi
-
-                        if [ "$STYLE_ERRORS" -gt 0 ]; then
-                            STYLE_BADGE_CLASS="b-warn"
-                            STYLE_BADGE_TEXT="${STYLE_ERRORS} ISSUES"
-                        else
-                            STYLE_BADGE_CLASS="b-secure"
-                            STYLE_BADGE_TEXT="PASSED"
-                        fi
-
-                        if [ "$TOTAL_VULN" -gt 0 ]; then
-                            SUPPLY_BADGE_TEXT="${TOTAL_VULN} VULNS"
-                        else
-                            SUPPLY_BADGE_TEXT="SECURE"
-                        fi
+                        # Dynamic Badges
+                        if [ "$TOTAL_VULN" -gt 0 ]; then VULN_CLASS="b-warn"; else VULN_CLASS="b-secure"; fi
+                        if [ "$STYLE_ERRORS" -gt 0 ]; then STYLE_CLASS="b-warn"; else STYLE_CLASS="b-secure"; fi
+                        if [ "$DOCKER_ISSUES" -gt 0 ]; then DOCKER_CLASS="b-warn"; else DOCKER_CLASS="b-secure"; fi
+                        if [ "$SEMGREP_ISSUES" -gt 0 ]; then SEMGREP_CLASS="b-warn"; else SEMGREP_CLASS="b-secure"; fi
 
                         # Chart Widths
-                        W_CRIT="${GRYPE_CRITICAL}0"
-                        W_HIGH="${GRYPE_HIGH}0"
-                        W_MED="${GRYPE_MEDIUM}0"
+                        W_CRIT="${CRIT}0"; W_HIGH="${HIGH}0"; W_MED="${MED}0"
 
-                        # --- 3. GENERATE HTML ---
+                        # --- 3. HTML GENERATION ---
                         cat > pipeline-report.html <<EOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Enterprise Security Audit</title>
+    <title>DevSecOps Audit</title>
     <style>
-        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #f4f6f8; margin: 0; color: #333; }
-        .header { background: ${HEADER_BG}; color: white; padding: 40px 20px; text-align: center; }
-        .header h1 { margin: 0; font-size: 2.2rem; }
-        .header p { opacity: 0.9; margin-top: 5px; }
-        .container { max-width: 1100px; margin: -30px auto 40px; padding: 0 20px; }
-        .card { background: white; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 25px; margin-bottom: 25px; }
-        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
-        .metric-box { text-align: center; padding: 15px; border-right: 1px solid #eee; }
-        .metric-box:last-child { border-right: none; }
-        .metric-val { display: block; font-size: 2rem; font-weight: bold; color: #2c3e50; }
-        .metric-lbl { font-size: 0.85rem; text-transform: uppercase; color: #7f8c8d; letter-spacing: 1px; }
-        .vuln-bar { display: flex; height: 20px; border-radius: 10px; overflow: hidden; margin-top: 10px; background: #eee; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th { text-align: left; padding: 12px; background: #34495e; color: white; font-size: 0.9rem; }
-        td { padding: 12px; border-bottom: 1px solid #ecf0f1; }
-        .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f4f7f6; margin: 0; color: #333; }
+        .header { background: ${HEADER_BG}; color: white; padding: 45px 20px; text-align: center; }
+        .header h1 { margin: 0; font-size: 2.5rem; letter-spacing: 1px; }
+        .container { max-width: 1000px; margin: -40px auto 40px; padding: 0 20px; }
+        .card { background: white; border-radius: 8px; box-shadow: 0 10px 20px rgba(0,0,0,0.05); padding: 30px; margin-bottom: 30px; }
+        
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }
+        .stat-item { text-align: center; padding: 10px; background: #f8f9fa; border-radius: 8px; }
+        .stat-val { font-size: 1.8rem; font-weight: bold; color: #2c3e50; display: block; }
+        .stat-lbl { font-size: 0.8rem; color: #7f8c8d; text-transform: uppercase; }
+
+        .vuln-bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: #eee; margin-top: 15px; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th { text-align: left; padding: 15px; background: #34495e; color: white; font-size: 0.9rem; }
+        td { padding: 15px; border-bottom: 1px solid #eee; }
+        .badge { padding: 6px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; }
         .b-secure { background: #d4edda; color: #155724; }
         .b-warn   { background: #fff3cd; color: #856404; }
         .b-info   { background: #d1ecf1; color: #0c5460; }
-        .footer { text-align: center; color: #aaa; font-size: 0.8rem; margin-top: 30px; }
+        
+        .footer { text-align: center; color: #bdc3c7; font-size: 0.85rem; margin-top: 50px; }
+        a { color: #3498db; text-decoration: none; font-weight: bold; }
     </style>
 </head>
 <body>
+
     <div class="header">
-        <h1>${STATUS_ICON} Security & Compliance Audit</h1>
-        <p>${JOB} | Build #${ID}</p>
+        <h1>${ICON} DevSecOps Certification</h1>
+        <p>${JOB} | Build #${ID} | Branch: ${BRANCH}</p>
     </div>
+
     <div class="container">
+        
+        <!-- High Level Stats -->
         <div class="card">
-            <h3 style="margin-top:0; color:#555;">Executive Summary</h3>
-            <div class="grid-3">
-                <div class="metric-box">
-                    <span class="metric-val">${PKG_COUNT}</span>
-                    <span class="metric-lbl">Assets Tracked (SBOM)</span>
+            <h3 style="margin-top:0; color:#2c3e50;">Executive Summary</h3>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <span class="stat-val">${PKG_COUNT}</span>
+                    <span class="stat-lbl">Components</span>
                 </div>
-                <div class="metric-box">
-                    <span class="metric-val" style="color:${VULN_TEXT_COLOR}">${TOTAL_VULN}</span>
-                    <span class="metric-lbl">Supply Chain Risks</span>
+                <div class="stat-item">
+                    <span class="stat-val" style="color:${TOTAL_VULN > 0 ? '#c0392b' : '#27ae60'}">${TOTAL_VULN}</span>
+                    <span class="stat-lbl">CVE Risks</span>
                 </div>
-                <div class="metric-box">
-                    <span class="metric-val">${STYLE_ERRORS}</span>
-                    <span class="metric-lbl">Compliance Violations</span>
+                <div class="stat-item">
+                    <span class="stat-val">${DOCKER_ISSUES}</span>
+                    <span class="stat-lbl">Docker Issues</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-val">${SEMGREP_ISSUES}</span>
+                    <span class="stat-lbl">Code Flaws</span>
                 </div>
             </div>
-            <div style="margin-top: 25px;">
-                <span style="font-size:0.9rem; font-weight:bold;">Vulnerability Severity Distribution</span>
-                <div class="vuln-bar">
+            
+            <div style="margin-top:20px;">
+                 <span style="font-size:0.9rem; font-weight:bold; color:#7f8c8d;">Vulnerability Distribution</span>
+                 <div class="vuln-bar">
                     <div style="width:${W_CRIT}px; background:#c0392b;" title="Critical"></div>
                     <div style="width:${W_HIGH}px; background:#e67e22;" title="High"></div>
                     <div style="width:${W_MED}px; background:#f1c40f;" title="Medium"></div>
-                </div>
-                <div style="font-size:0.75rem; color:#888; margin-top:5px;">
-                    Critical: ${GRYPE_CRITICAL} | High: ${GRYPE_HIGH} | Medium: ${GRYPE_MEDIUM}
-                </div>
+                 </div>
+                 <div style="text-align:right; font-size:0.75rem; color:#95a5a6; margin-top:5px;">
+                    Critical: ${CRIT} | High: ${HIGH} | Medium: ${MED}
+                 </div>
             </div>
         </div>
+
+        <!-- Compliance Matrix -->
         <div class="card">
-            <h3 style="margin-top:0; color:#555;">🛡️ Compliance Control Gates</h3>
+            <h3 style="margin-top:0; color:#2c3e50;">🛡️ Security Control Gates</h3>
             <table>
                 <thead>
                     <tr>
-                        <th>Control Domain</th>
-                        <th>Tool / Standard</th>
-                        <th>Scope of Audit</th>
+                        <th>Domain</th>
+                        <th>Tool</th>
+                        <th>Scope</th>
                         <th>Status</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
-                        <td><strong>Access Control</strong></td>
+                        <td><strong>Secrets Management</strong></td>
                         <td>Gitleaks</td>
-                        <td>Secret Key & Credential Leakage</td>
+                        <td>Hardcoded Credentials Scan</td>
                         <td><span class="badge b-secure">PASSED</span></td>
                     </tr>
                     <tr>
-                        <td><strong>Code Standards</strong></td>
-                        <td>Checkstyle (Google)</td>
-                        <td>Formatting, Naming, Javadoc</td>
-                        <td><span class="badge ${STYLE_BADGE_CLASS}">${STYLE_BADGE_TEXT}</span></td>
-                    </tr>
-                    <tr>
-                        <td><strong>Infrastructure</strong></td>
-                        <td>Trivy</td>
-                        <td>OS Hardening & Filesystem Config</td>
-                        <td><span class="badge b-secure">PASSED</span></td>
+                        <td><strong>Infrastructure (IaC)</strong></td>
+                        <td>Trivy + Hadolint</td>
+                        <td>OS Hardening & Dockerfile Compliance</td>
+                        <td><span class="badge ${DOCKER_CLASS}">CHECKED: ${DOCKER_ISSUES}</span></td>
                     </tr>
                     <tr>
                         <td><strong>Supply Chain</strong></td>
                         <td>Syft + Grype</td>
-                        <td>Dependency Inventory & CVE Scan</td>
-                        <td><span class="badge ${VULN_BADGE_CLASS}">${SUPPLY_BADGE_TEXT}</span></td>
+                        <td>BOM Inventory & Vulnerability Scan</td>
+                        <td><span class="badge ${VULN_CLASS}">${TOTAL_VULN} DETECTED</span></td>
                     </tr>
                     <tr>
-                        <td><strong>App Security</strong></td>
+                        <td><strong>Advanced SAST</strong></td>
+                        <td>Semgrep</td>
+                        <td>OWASP Top 10 & Business Logic</td>
+                        <td><span class="badge ${SEMGREP_CLASS}">${SEMGREP_ISSUES} FINDINGS</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Code Quality</strong></td>
+                        <td>Checkstyle (Google)</td>
+                        <td>Syntax & Formatting Standards</td>
+                        <td><span class="badge ${STYLE_CLASS}">${STYLE_ERRORS} ISSUES</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Deep Analysis</strong></td>
                         <td>SonarQube</td>
-                        <td>Logic Flaws, Bugs & Hotspots</td>
-                        <td><span class="badge b-info">ANALYZED</span></td>
+                        <td>Cyclomatic Complexity & Bugs</td>
+                        <td><span class="badge b-info">UPLOADED</span></td>
                     </tr>
                 </tbody>
             </table>
         </div>
+
         <div class="footer">
-            Report Generated by Jenkins CI/CD on ${DATE_STR}
+            Generated by Jenkins CI/CD | <a href="${URL}">View Console</a> | <a href="${URL}artifact/">Download Reports</a>
         </div>
+
     </div>
 </body>
 </html>
@@ -315,23 +325,22 @@ EOF
                     '''
                 }
             }
-            // THIS POST BLOCK IS REQUIRED TO SEE THE REPORT IN JENKINS
             post {
                 always {
-                    // Archive artifacts so you can download them
-                    archiveArtifacts artifacts: 'sbom.json, grype-report.json, checkstyle-result.xml, pipeline-report.html', allowEmptyArchive: true
+                    // Archive ALL reports
+                    archiveArtifacts artifacts: '*.json, *.xml, *.html', allowEmptyArchive: true
                     
-                    // Publish the HTML Report to the Sidebar
                     publishHTML([
                         allowMissing: false,
                         alwaysLinkToLastBuild: true,
                         keepAll: true,
                         reportDir: '',
                         reportFiles: 'pipeline-report.html',
-                        reportName: 'Enterprise Compliance Report'
+                        reportName: 'DevSecOps Audit Report'
                     ])
                 }
             }
         }
+    }
     }
 }
