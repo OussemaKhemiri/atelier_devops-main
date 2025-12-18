@@ -135,12 +135,10 @@ pipeline {
                         DATE_STR=$(date "+%Y-%m-%d %H:%M")
                         
                         # Grype: Count Vulnerabilities (using grep count)
-                        # We use || true to prevent failure if grep finds nothing (exit code 1)
                         GRYPE_CRITICAL=$(grep -o '"severity":"Critical"' grype-report.json | wc -l)
                         GRYPE_HIGH=$(grep -o '"severity":"High"' grype-report.json | wc -l)
                         GRYPE_MEDIUM=$(grep -o '"severity":"Medium"' grype-report.json | wc -l)
                         
-                        # Calculate Total (Standard Arithmetic)
                         TOTAL_VULN=$((GRYPE_CRITICAL + GRYPE_HIGH + GRYPE_MEDIUM))
 
                         # Syft: Count Packages
@@ -149,9 +147,8 @@ pipeline {
                         # Checkstyle: Count Errors
                         STYLE_ERRORS=$(grep -o '<error' checkstyle-result.xml | wc -l)
                         
-                        # --- 2. CALCULATE LOGIC (SHELL COMPATIBLE) ---
+                        # --- 2. CALCULATE LOGIC ---
                         
-                        # Build Status Logic
                         if [ "$BUILD_RES" = "FAILURE" ]; then
                             HEADER_BG="linear-gradient(135deg, #c0392b, #e74c3c)"
                             STATUS_ICON="❌"
@@ -160,7 +157,6 @@ pipeline {
                             STATUS_ICON="✅"
                         fi
 
-                        # Vulnerability Text Color Logic
                         if [ "$TOTAL_VULN" -gt 0 ]; then
                             VULN_TEXT_COLOR="#c0392b"
                             VULN_BADGE_CLASS="b-warn"
@@ -169,7 +165,6 @@ pipeline {
                             VULN_BADGE_CLASS="b-secure"
                         fi
 
-                        # Checkstyle Badge Logic
                         if [ "$STYLE_ERRORS" -gt 0 ]; then
                             STYLE_BADGE_CLASS="b-warn"
                             STYLE_BADGE_TEXT="${STYLE_ERRORS} ISSUES"
@@ -178,15 +173,12 @@ pipeline {
                             STYLE_BADGE_TEXT="PASSED"
                         fi
 
-                        # Supply Chain Badge Logic
                         if [ "$TOTAL_VULN" -gt 0 ]; then
                             SUPPLY_BADGE_TEXT="${TOTAL_VULN} VULNS"
                         else
                             SUPPLY_BADGE_TEXT="SECURE"
                         fi
 
-                        # Width Logic for Charts (Simple multiplication by string concatenation)
-                        # We clamp usage to avoid breaking layout if numbers are huge
                         W_CRIT="${GRYPE_CRITICAL}0"
                         W_HIGH="${GRYPE_HIGH}0"
                         W_MED="${GRYPE_MEDIUM}0"
@@ -204,16 +196,13 @@ pipeline {
         .header h1 { margin: 0; font-size: 2.2rem; }
         .header p { opacity: 0.9; margin-top: 5px; }
         .container { max-width: 1100px; margin: -30px auto 40px; padding: 0 20px; }
-        
         .card { background: white; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); padding: 25px; margin-bottom: 25px; }
         .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
         .metric-box { text-align: center; padding: 15px; border-right: 1px solid #eee; }
         .metric-box:last-child { border-right: none; }
         .metric-val { display: block; font-size: 2rem; font-weight: bold; color: #2c3e50; }
         .metric-lbl { font-size: 0.85rem; text-transform: uppercase; color: #7f8c8d; letter-spacing: 1px; }
-
         .vuln-bar { display: flex; height: 20px; border-radius: 10px; overflow: hidden; margin-top: 10px; background: #eee; }
-        
         table { width: 100%; border-collapse: collapse; margin-top: 15px; }
         th { text-align: left; padding: 12px; background: #34495e; color: white; font-size: 0.9rem; }
         td { padding: 12px; border-bottom: 1px solid #ecf0f1; }
@@ -221,20 +210,15 @@ pipeline {
         .b-secure { background: #d4edda; color: #155724; }
         .b-warn   { background: #fff3cd; color: #856404; }
         .b-info   { background: #d1ecf1; color: #0c5460; }
-
         .footer { text-align: center; color: #aaa; font-size: 0.8rem; margin-top: 30px; }
     </style>
 </head>
 <body>
-
     <div class="header">
         <h1>${STATUS_ICON} Security & Compliance Audit</h1>
         <p>${JOB} | Build #${ID}</p>
     </div>
-
     <div class="container">
-
-        <!-- EXECUTIVE SUMMARY METRICS -->
         <div class="card">
             <h3 style="margin-top:0; color:#555;">Executive Summary</h3>
             <div class="grid-3">
@@ -251,7 +235,6 @@ pipeline {
                     <span class="metric-lbl">Compliance Violations</span>
                 </div>
             </div>
-            
             <div style="margin-top: 25px;">
                 <span style="font-size:0.9rem; font-weight:bold;">Vulnerability Severity Distribution</span>
                 <div class="vuln-bar">
@@ -264,8 +247,6 @@ pipeline {
                 </div>
             </div>
         </div>
-
-        <!-- DETAILED COMPLIANCE TABLE -->
         <div class="card">
             <h3 style="margin-top:0; color:#555;">🛡️ Compliance Control Gates</h3>
             <table>
@@ -311,15 +292,6 @@ pipeline {
                 </tbody>
             </table>
         </div>
-
-        <!-- LINKS -->
-        <div class="card" style="text-align:center;">
-             <h3 style="margin-top:0; color:#555;">Artifacts & Logs</h3>
-             <a href="${URL}" style="text-decoration:none; color:#3498db; margin:0 10px; font-weight:bold;">View Console</a> | 
-             <a href="${URL}artifact/sbom.json" style="text-decoration:none; color:#3498db; margin:0 10px; font-weight:bold;">Download SBOM</a> | 
-             <a href="${URL}artifact/grype-report.json" style="text-decoration:none; color:#3498db; margin:0 10px; font-weight:bold;">Download Risk Report</a>
-        </div>
-
         <div class="footer">
             Report Generated by Jenkins CI/CD on ${DATE_STR}
         </div>
@@ -330,6 +302,23 @@ EOF
                     '''
                 }
             }
-    }
+            // THIS IS THE PART YOU WERE MISSING:
+            post {
+                always {
+                    // 1. Archive the Files so you can download them
+                    archiveArtifacts artifacts: 'sbom.json, grype-report.json, checkstyle-result.xml, pipeline-report.html', allowEmptyArchive: true
+                    
+                    // 2. Publish the HTML to the Jenkins Sidebar
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: '',
+                        reportFiles: 'pipeline-report.html',
+                        reportName: 'Enterprise Compliance Report'
+                    ])
+                }
+            }
+        }
 }
 }
