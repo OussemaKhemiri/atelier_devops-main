@@ -89,26 +89,31 @@ pipeline {
 
         stage('Generate Executive Report') {
             steps {
-
-                // CPS-safe build status
-                script {
-                    env.BUILD_RES = currentBuild.currentResult
-                }
-
+                // 1. Pass Groovy variables to the Shell Environment
+                // Jenkins handles this easily.
                 withEnv([
+                    "BUILD_RES=${currentBuild.currentResult ?: 'SUCCESS'}",
                     "JOB=${env.JOB_NAME}",
                     "ID=${env.BUILD_NUMBER}",
                     "BRANCH=${env.BRANCH_NAME}",
                     "URL=${env.BUILD_URL}"
                 ]) {
-
+                    // 2. Run Shell Script
+                    // Use SINGLE QUOTES (''') so Jenkins doesn't touch the internal variables.
                     sh '''
                         #!/bin/bash
-
+                        
+                        # --- PREPARE DATA IN LINUX ---
                         DATE_STR=$(date "+%Y-%m-%d %H:%M")
+                        
+                        # Sanitize Commit Message: 
+                        # 1. Get message 
+                        # 2. Replace newlines with spaces (tr '\\n' ' ')
+                        # 3. Remove double quotes to prevent HTML breaking (tr -d '"')
                         COMMIT_MSG=$(git log -1 --pretty=%B | tr '\\n' ' ' | tr -d '"')
-
-                        if [ "$BUILD_RES" = "FAILURE" ]; then
+                        
+                        # Logic for Colors (Bash Style)
+                        if [ "$BUILD_RES" == "FAILURE" ]; then
                             COLOR="#c0392b"
                             BADGE="badge-danger"
                         else
@@ -116,6 +121,9 @@ pipeline {
                             BADGE="badge-success"
                         fi
 
+                        # --- WRITE FILE ---
+                        # We use 'cat' with a Heredoc (<<EOF). 
+                        # Linux fills in the ${VAR} values.
                         cat > pipeline-report.html <<EOF
 <!DOCTYPE html>
 <html>
@@ -139,8 +147,7 @@ pipeline {
 </head>
 <body>
     <div class="container">
-        <h1>Pipeline Execution Report</h1>
-
+        <h1>🚀 Pipeline Execution Report</h1>
         <div class="summary-grid">
             <div class="card">
                 <h3>Build Information</h3>
@@ -149,30 +156,31 @@ pipeline {
                 <p><strong>Branch:</strong> ${BRANCH}</p>
                 <p><strong>Date:</strong> ${DATE_STR}</p>
             </div>
-
             <div class="card" style="border-left-color: ${COLOR}">
                 <h3>Overall Status</h3>
-                <span class="badge ${BADGE}">${BUILD_RES}</span>
+                <div style="font-size: 24px; margin-top: 10px;">
+                    <span class="badge ${BADGE}">${BUILD_RES}</span>
+                </div>
                 <p><small>Commit: ${COMMIT_MSG}</small></p>
             </div>
         </div>
 
-        <h2>Security & Quality Assurance</h2>
+        <h2>🛡️ Security & Quality Assurance</h2>
         <table>
             <thead>
                 <tr>
-                    <th>Tier</th>
-                    <th>Tool</th>
-                    <th>Description</th>
+                    <th>Security Tier</th>
+                    <th>Tool Used</th>
+                    <th>Description of Check</th>
                     <th>Status</th>
                 </tr>
             </thead>
             <tbody>
-                <tr><td>Secrets</td><td>Gitleaks</td><td>Credential detection</td><td><span class="badge badge-success">Completed</span></td></tr>
-                <tr><td>Infrastructure</td><td>Trivy</td><td>Filesystem scan</td><td><span class="badge badge-success">Completed</span></td></tr>
-                <tr><td>SCA</td><td>OWASP DC</td><td>Dependency CVEs</td><td><span class="badge badge-success">Completed</span></td></tr>
-                <tr><td>SAST</td><td>SonarQube</td><td>Static analysis</td><td><span class="badge badge-success">Sent</span></td></tr>
-                <tr><td>Testing</td><td>JUnit</td><td>Unit validation</td><td><span class="badge badge-success">Completed</span></td></tr>
+                <tr><td><strong>Secrets Detection</strong></td><td>🕵️ Gitleaks</td><td>Scans code history for hardcoded passwords.</td><td><span class="badge badge-success">Completed</span></td></tr>
+                <tr><td><strong>Infrastructure</strong></td><td>🐳 Trivy</td><td>Scans filesystem and OS packages.</td><td><span class="badge badge-success">Completed</span></td></tr>
+                <tr><td><strong>SCA (Dependencies)</strong></td><td>📦 OWASP DC</td><td>Checks Java libraries against NVD.</td><td><span class="badge badge-success">Completed</span></td></tr>
+                <tr><td><strong>SAST (Code Quality)</strong></td><td>🧠 SonarQube</td><td>Static analysis for bugs.</td><td><span class="badge badge-success">Sent to Server</span></td></tr>
+                <tr><td><strong>Unit Verification</strong></td><td>🧪 JUnit</td><td>Functional unit tests validation.</td><td><span class="badge badge-success">Completed</span></td></tr>
             </tbody>
         </table>
 
@@ -187,7 +195,6 @@ EOF
                     '''
                 }
             }
-
             post {
                 always {
                     publishHTML([
